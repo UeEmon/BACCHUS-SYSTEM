@@ -1,0 +1,19 @@
+services:
+  bacchus:
+    build: .
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${BACCHUS_PORT:-8092}:8000"
+    environment:
+      BACCHUS_USERS: ${BACCHUS_USERS:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-}
+    volumes:
+      - bacchus-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health',timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+volumes:
+  bacchus-data:
