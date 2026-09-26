@@ -36,7 +36,11 @@ class InventoryService:
         kind = command.get('type')
         now = datetime.now(timezone.utc).isoformat()
         e = dict(id=cid, type=kind, at=now, actor=command['actor'], before=None, after=None)
-        if kind == 'addFridge':
+        if kind == 'importPersonal':
+            from .migration import merge_personal_snapshot
+            result=merge_personal_snapshot(s,p.get('snapshot'))
+            e.update(name='個人データの移行',**result)
+        elif kind == 'addFridge':
             name = string(p.get('name', ''), 80)
             fid = string(p.get('id', ''), 80)
             if not name or not fid or any(f['id'] == fid for f in s['refrigerators']):

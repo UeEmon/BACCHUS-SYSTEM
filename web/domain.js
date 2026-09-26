@@ -1,3 +1,4 @@
+import {mergePersonalSnapshot} from './migration.js';
 export const emptyState = () => ({schema:1, refrigerators:[], bottles:[], events:[]});
 const fail = message => { throw new Error(message); };
 export const id = () => crypto.randomUUID();
@@ -24,7 +25,9 @@ export class InventoryService {
     const {type, payload:p={}} = command;
     const event = {id:command.id, type, at:command.at, actor:command.actor || '個人', before:null, after:null};
     if(!command.id || !command.at) fail('操作IDがありません');
-    if(type==='addFridge') {
+    if(type==='importPersonal') {
+      const result=mergePersonalSnapshot(s,p.snapshot);event.name='個人データの移行';event.added=result.added;event.skipped=result.skipped;
+    } else if(type==='addFridge') {
       const name=text(p.name,80); if(!name) fail('冷蔵庫名を入力してください');
       if(s.refrigerators.some(f=>f.id===p.id)) fail('冷蔵庫IDが重複しています');
       s.refrigerators.push({id:p.id, name}); event.name=name;

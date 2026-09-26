@@ -37,7 +37,7 @@ class Handler(BaseHTTPRequestHandler):
             if path=='/api/state':return self.json(200,self.server.application.repository.read())
             return self.json(404,{'error':'対象がありません'})
         # Explicit static whitelist: server files, credentials and DB are never served.
-        names={'/':'index.html','/index.html':'index.html','/app.js':'app.js','/domain.js':'domain.js','/repositories.js':'repositories.js','/styles.css':'styles.css','/manifest.webmanifest':'manifest.webmanifest','/sw.js':'sw.js','/icon.svg':'icon.svg'}
+        names={'/':'index.html','/index.html':'index.html','/app.js':'app.js','/domain.js':'domain.js','/migration.js':'migration.js','/repositories.js':'repositories.js','/styles.css':'styles.css','/manifest.webmanifest':'manifest.webmanifest','/sw.js':'sw.js','/icon.svg':'icon.svg'}
         if path not in names:return self.json(404,{'error':'対象がありません'})
         file=WEB/names[path]
         mime={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.webmanifest':'application/manifest+json','.svg':'image/svg+xml'}[file.suffix]
@@ -47,7 +47,7 @@ class Handler(BaseHTTPRequestHandler):
         if not user:return self.json(401,{'error':'接続トークンが無効です'})
         try:
             length=int(self.headers.get('Content-Length','0'))
-            if length<=0 or length>2000000:return self.json(413,{'error':'送信データが大きすぎます'})
+            if length<=0 or length>25000000:return self.json(413,{'error':'送信データが大きすぎます'})
             data=json.loads(self.rfile.read(length))
             if not isinstance(data,dict):raise DomainError('リクエストが不正です')
             path=urlsplit(self.path).path

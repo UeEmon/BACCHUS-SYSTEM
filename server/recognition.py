@@ -39,7 +39,7 @@ class GeminiRecognizer:
             if not isinstance(result,dict): raise ValueError()
         except urllib.error.HTTPError as error:
             raise RecognitionError(f'AIサービスでエラーが発生しました（HTTP {error.code}）。手入力または後で再試行してください。') from None
-        except (ValueError,KeyError,IndexError,urllib.error.URLError,TimeoutError):
+        except (ValueError,TypeError,AttributeError,KeyError,IndexError,urllib.error.URLError,TimeoutError):
             raise RecognitionError('AIの応答を読み取れません。再撮影または手入力をお試しください。') from None
         clean={k:result[k][:200] if isinstance(result.get(k),str) else '' for k in ('name','brewery','category','productionDate','notes')}
         clean['volume']=result.get('volume') if type(result.get('volume')) is int and 1<=result['volume']<=10000 else None
