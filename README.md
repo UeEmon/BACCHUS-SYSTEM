@@ -27,7 +27,7 @@ cd BACCHUS-SYSTEM
 python3 -m server.app
 ```
 
-PCで http://127.0.0.1:8000 を開きます。非公開リポジトリのcloneにはGitHub認証が必要です。未設定でも個人用モードが動作します。
+PCで http://127.0.0.1:8000 を開きます。公開リポジトリのcloneにはGitHub認証は不要です。未設定でも個人用モードが動作します。
 
 ## Docker Desktop
 
