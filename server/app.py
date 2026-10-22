@@ -17,7 +17,7 @@ class Application:
         # tokens map to display names; no implicit unauthenticated shared access.
         if not isinstance(self.users,dict) or any(not isinstance(k,str) or len(k)<24 or not isinstance(v,str) or not v for k,v in self.users.items()):
             raise ValueError('BACCHUS_USERS requires JSON {"long-random-token": "display name"}; minimum token length 24')
-        self.recognizer=GeminiRecognizer()
+        self.recognizer=GeminiRecognizer(self.repository)
     def user(self,header):
         token=header.removeprefix('Bearer ')
         return next((name for key,name in self.users.items() if hmac.compare_digest(key,token)),None)
@@ -33,7 +33,8 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith('/api/'):
             user=self.server.application.user(self.headers.get('Authorization',''))
             if not user:return self.json(401,{'error':'接続トークンが無効です'})
-            if path=='/api/session':return self.json(200,{'user':user,'workspace':self.server.application.repository.workspace(),'aiConfigured':bool(os.environ.get('GEMINI_API_KEY') and os.environ.get('GEMINI_MODEL'))})
+            if path=='/api/session':return self.json(200,{'user':user,'workspace':self.server.application.repository.workspace(),'aiConfigured':self.server.application.recognizer.status()['configured']})
+            if path=='/api/ai-settings':return self.json(200,self.server.application.recognizer.status())
             if path=='/api/state':return self.json(200,self.server.application.repository.read())
             return self.json(404,{'error':'対象がありません'})
         # Explicit static whitelist: server files, credentials and DB are never served.
@@ -54,6 +55,10 @@ class Handler(BaseHTTPRequestHandler):
             if path=='/api/commands':
                 data['actor']=user
                 return self.json(200,self.server.application.repository.execute(data))
+            if path=='/api/ai-settings':
+                recognizer=self.server.application.recognizer
+                if data.get('clear') is True:return self.json(200,recognizer.clear())
+                return self.json(200,recognizer.configure(data.get('apiKey') or None,data.get('model','auto')))
             if path=='/api/recognize':return self.json(200,self.server.application.recognizer.recognize(data.get('photo')))
             return self.json(404,{'error':'対象がありません'})
         except DomainError as error:self.json(409,{'error':str(error)})

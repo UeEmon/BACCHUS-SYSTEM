@@ -19,6 +19,17 @@ class SQLiteRepository:
     def workspace(self):
         with self.connect() as db:
             return db.execute("SELECT value FROM metadata WHERE key='workspace'").fetchone()[0]
+    # Server settings live in metadata, outside the inventory state, so /api/state and exports never carry them.
+    def get_setting(self, key):
+        with self.connect() as db:
+            row=db.execute('SELECT value FROM metadata WHERE key=?',('setting:'+key,)).fetchone()
+            return row[0] if row else None
+    def set_setting(self, key, value):
+        with self.connect() as db:
+            db.execute('INSERT OR REPLACE INTO metadata VALUES (?,?)',('setting:'+key,value))
+    def delete_setting(self, key):
+        with self.connect() as db:
+            db.execute('DELETE FROM metadata WHERE key=?',('setting:'+key,))
     def read(self):
         with self.connect() as db:
             return json.loads(db.execute('SELECT data FROM state WHERE id=1').fetchone()[0])

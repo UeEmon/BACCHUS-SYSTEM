@@ -1,4 +1,5 @@
 import concurrent.futures
+import io
 import json
 import os
 import tempfile
@@ -61,5 +62,21 @@ class HttpTests(unittest.TestCase):
             request=urllib.request.Request(self.url+'/api/commands',data=json.dumps(c).encode(),headers={'Authorization':'Bearer '+self.token,'Content-Type':'application/json'})
             with urllib.request.urlopen(request) as response:return json.load(response)
         s=send();self.assertEqual(s['events'][0]['actor'],'Alice');self.assertEqual(send(),s)
+    def test_ai_settings_endpoint(self):
+        def call(path,body=None,token=None):
+            request=urllib.request.Request(self.url+path,data=json.dumps(body).encode() if body is not None else None,headers={'Authorization':'Bearer '+(token or self.token),'Content-Type':'application/json'})
+            with urllib.request.urlopen(request) as response:return json.load(response)
+        with self.assertRaises(urllib.error.HTTPError) as e:call('/api/ai-settings',{'apiKey':'x'*30},token='wrong-token-longer-than-24-chars')
+        self.assertEqual(e.exception.code,401)
+        self.assertFalse(call('/api/ai-settings')['configured'])
+        key='AIzaTestKey_0123456789abcdef';listing=json.dumps({'models':[{'name':'models/gemini-3.5-flash','supportedGenerationMethods':['generateContent']}]}).encode()
+        real=urllib.request.urlopen
+        def fake(request,*args,**kwargs):
+            url=request.full_url if hasattr(request,'full_url') else request
+            return io.BytesIO(listing) if url.startswith('https://generativelanguage') else real(request,*args,**kwargs)
+        with patch('server.recognition.urllib.request.urlopen',side_effect=fake):status=call('/api/ai-settings',{'apiKey':key,'model':'auto'})
+        self.assertEqual(status['model'],'gemini-3.5-flash');self.assertNotIn(key,json.dumps(status))
+        self.assertTrue(call('/api/session')['aiConfigured']);self.assertNotIn(key,json.dumps(call('/api/state')))
+        self.assertFalse(call('/api/ai-settings',{'clear':True})['configured'])
 
 if __name__=='__main__':unittest.main()
