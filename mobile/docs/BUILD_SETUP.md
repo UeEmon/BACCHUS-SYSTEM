@@ -6,7 +6,7 @@ BACCHUSアプリ（`mobile/`）をAndroid・iOS向けにビルドし、端末で
 |---|---|
 | Androidのビルド・実機確認 | Windows・macOS・LinuxのPC、Android端末（Android 9以上） |
 | iOSのビルド・実機確認 | **Mac**（macOSとXcode）、iPhone（iOS 15以上） |
-| Macなしでビルドの確認だけ | GitHubリポジトリ（「5. GitHub Actions」） |
+| Macなしでビルド・署名 | GitHubリポジトリ（「5. GitHub Actions」）。署名にはストアの開発者アカウント |
 | Google Playへの公開 | Google Play Consoleの開発者アカウント（登録料が必要） |
 | App Storeへの公開 | Apple Developer Program（年会費が必要）とMac |
 
@@ -100,7 +100,7 @@ flutter build apk --release         # 直接配布・確認用: build/app/output
 ### 2-4. Google Playへの提出
 
 1. Play Console（https://play.google.com/console）でアプリを作成します。
-2. 公開前に、アプリID `jp.bacchus.bacchus_mobile` を自社のドメインに合わせて変更します（`android/app/build.gradle.kts` の `applicationId` と `namespace`、`MainActivity.kt` のパッケージ）。**公開後は変更できません**。
+2. アプリIDは `jp.bacchus.app` です（iOSのBundle IDも同じ）。**公開後は変更できません**。
 3. 「内部テスト」トラックに `.aab` をアップロードし、テスターの端末で確認してから製品版へ進めます。Play App Signingを使うと、配布用の署名はGoogleが管理します。
 4. データセーフティの申告では、メールアドレス・写真（ラベル）をサーバーへ送信すること、生体情報は端末外へ送らないことを記載します。
 
@@ -132,14 +132,14 @@ flutter run
 実機（iPhone）の場合：
 
 1. Xcodeで `mobile/ios/Runner.xcworkspace` を開きます。
-2. 「Runner」→「Signing & Capabilities」で **Team** に自分のApple ID（またはApple Developer Programのチーム）を選びます。Bundle Identifier が他と重なるとエラーになるため、`jp.<組織>.bacchus` など固有の値に変更します。
+2. 「Runner」→「Signing & Capabilities」で **Team** に自分のApple ID（またはApple Developer Programのチーム）を選びます。Bundle Identifier は `jp.bacchus.app` です。個人のApple IDで試す場合など、登録済みでないIDが使えないときは一時的に固有の値に変えて試し、コミットしないでください。
 3. iPhoneをUSBで接続し、iPhoneの「設定」→「プライバシーとセキュリティ」→「デベロッパモード」をオンにします。
 4. `flutter run --release` で起動します。無料のApple IDでは7日で起動できなくなるため、継続利用にはApple Developer Programが必要です。
 
 ### 3-3. App Storeへの提出
 
 1. Apple Developer Program に登録します。
-2. App Store Connect（https://appstoreconnect.apple.com）でアプリを作成し、Bundle Identifier を登録します。
+2. App ID `jp.bacchus.app` を登録し（「5-2」の①）、App Store Connect（https://appstoreconnect.apple.com）でこのBundle IDのアプリを作成します。
 3. ビルドしてアップロードします。
 
    ```sh
@@ -161,26 +161,90 @@ flutter run
 
 スキームは他のアプリと重ならない名前（例 `jp.example.bacchus`）に変える場合、3か所すべてを同じ値にします。
 
-## 5. GitHub Actions（Macがない場合・自動ビルド）
+## 5. GitHub Actions（署名付きビルド・Macがない場合）
 
-`.github/workflows/mobile.yml` が、`mobile/` や `server/` を変更してpushするたびに次を実行します（GitHubの「Actions」タブで結果を確認。手動実行も可）。
+`.github/workflows/mobile.yml` が、`mobile/` や `server/` を変更してpushするたびに次を実行します（GitHubの「Actions」タブで確認。「Run workflow」で手動実行も可）。
 
-| ジョブ | 実行環境 | 内容 |
-|---|---|---|
-| test | Ubuntu | 静的解析、アプリのテスト、実サーバーとの結合テスト |
-| android | Ubuntu | APK・AABのビルド（成果物としてダウンロード可） |
-| ios | macOS | iOSのビルド（署名なし。コンパイルできることの確認） |
+| ジョブ | 実行環境 | シークレット未登録 | シークレット登録済み |
+|---|---|---|---|
+| test | Ubuntu | 静的解析、アプリのテスト、実サーバーとの結合テスト | 同左 |
+| android | Ubuntu | デバッグ署名のAPK・AAB（成果物 `android-test`） | **アップロード鍵で署名したAPK・AAB**（成果物 `android-signed`） |
+| ios | macOS | 署名なしのビルド（成果物 `ios-unsigned`） | **App Store配布用に署名したIPA**（成果物 `ios-signed`） |
 
-**Androidのリリース署名をCIで行う場合**は、リポジトリの「Settings」→「Secrets and variables」→「Actions」に次の4つを登録します。
+署名付きビルドのビルド番号はGitHub Actionsの実行番号です。実行のたびに増えるため、そのままストアにアップロードできます（表示用のバージョン `1.0.0` は `pubspec.yaml` の `version` で変更）。成果物は実行結果ページ下部の「Artifacts」から90日間ダウンロードできます。
+
+シークレットは、リポジトリの「Settings」→「Secrets and variables」→「Actions」→「New repository secret」で登録します。登録した値は画面にも実行ログにも表示されず、フォークからのプルリクエストでは使われません。
+
+### 5-1. Android の署名用シークレット
+
+1. 「2-3」の手順でアップロード鍵（`bacchus-upload-keystore.jks`）を作ります。
+2. 鍵ファイルをBase64の文字列にします。
+
+   ```sh
+   # macOS
+   base64 -i bacchus-upload-keystore.jks | pbcopy        # クリップボードにコピー
+   # Linux
+   base64 -w0 bacchus-upload-keystore.jks
+   # Windows（PowerShell）
+   [Convert]::ToBase64String([IO.File]::ReadAllBytes("$env:USERPROFILE\bacchus-upload-keystore.jks")) | Set-Clipboard
+   ```
+
+3. 次の4つを登録します。
+
+   | シークレット | 値 |
+   |---|---|
+   | `ANDROID_KEYSTORE_BASE64` | 手順2の文字列 |
+   | `ANDROID_STORE_PASSWORD` | 鍵ストアのパスワード |
+   | `ANDROID_KEY_ALIAS` | `upload` |
+   | `ANDROID_KEY_PASSWORD` | 鍵のパスワード |
+
+ジョブは、シークレットがあるのにデバッグ署名になった場合は失敗し、署名者（`Owner:`）をログに出します。Google Playでは初回アップロード時に「Play App Signing」を有効にすると、このアップロード鍵は万一漏れても再発行できます。
+
+### 5-2. iOS の署名用シークレット
+
+Apple Developer Program への登録が必要です。Bundle ID は `jp.bacchus.app` です。証明書の作成にMacは不要です（以下はMacがない場合の手順。MacがあればXcodeやキーチェーンアクセスでも作れます）。
+
+**① App ID を登録**：https://developer.apple.com/account/resources/identifiers →「＋」→「App IDs」→「App」。Description は `BACCHUS`、Bundle ID は Explicit で `jp.bacchus.app`。追加の機能（Capabilities）は不要です。
+
+**② 配布用証明書（Apple Distribution）を作る**：秘密鍵と証明書署名要求（CSR）をOpenSSLで作ります（Windowsは Git for Windows に付属の Git Bash で実行できます）。
+
+```sh
+openssl genrsa -out bacchus-dist.key 2048
+openssl req -new -key bacchus-dist.key -out bacchus-dist.csr -subj "/emailAddress=you@example.com/CN=BACCHUS Distribution/C=JP"
+```
+
+https://developer.apple.com/account/resources/certificates →「＋」→「Apple Distribution」→ `bacchus-dist.csr` をアップロード → `distribution.cer` をダウンロードします。続けて、証明書と秘密鍵を1つの .p12 にまとめます（パスワードを設定します）。
+
+```sh
+openssl x509 -inform DER -in distribution.cer -out distribution.pem
+openssl pkcs12 -export -legacy -inkey bacchus-dist.key -in distribution.pem -name "BACCHUS Distribution" -out bacchus-dist.p12
+# 古いOpenSSL（1.x）で -legacy がエラーになる場合は -legacy を外します
+```
+
+**③ App Store 用プロビジョニングプロファイルを作る**：https://developer.apple.com/account/resources/profiles →「＋」→ Distribution の「App Store Connect」→ App ID `jp.bacchus.app` → ②の証明書 → 名前（例 `BACCHUS App Store`）→ `.mobileprovision` をダウンロードします。
+
+**④ シークレットを登録**：
 
 | シークレット | 値 |
 |---|---|
-| `ANDROID_KEYSTORE_BASE64` | `base64 -i bacchus-upload-keystore.jks`（Windowsは `certutil -encode` の本文部分）の出力 |
-| `ANDROID_STORE_PASSWORD` | 鍵ストアのパスワード |
-| `ANDROID_KEY_ALIAS` | `upload` |
-| `ANDROID_KEY_PASSWORD` | 鍵のパスワード |
+| `IOS_DIST_CERT_P12_BASE64` | `base64 -i bacchus-dist.p12`（Linux は `base64 -w0`、Windows は上のPowerShellと同じ方法）の出力 |
+| `IOS_DIST_CERT_PASSWORD` | ②で .p12 に設定したパスワード |
+| `IOS_PROVISION_PROFILE_BASE64` | `.mobileprovision` ファイルのBase64 |
 
-**iOSの署名付きビルド・App Storeへのアップロード**をCIで行うには、配布用証明書・プロビジョニングプロファイル（またはApp Store Connect APIキー）をシークレットに登録する追加設定が必要です。最初はMacのXcodeから手動でアップロードし、運用が固まってからfastlane等で自動化することを推奨します。
+ジョブは一時的なキーチェーンに証明書を入れ、プロファイルの内容（App IDが `jp.bacchus.app` か、App Store用か）を確かめてから署名し、終了時にキーチェーンとプロファイルを削除します。プロファイルの名前・チームIDはファイルから読み取るため、登録は不要です。
+
+**⑤ 期限と保管**：証明書とプロファイルは1年で期限が切れます。期限前に②③をやり直してシークレットを更新してください（ログにプロファイルの期限を表示します）。`bacchus-dist.key`・`.p12`・パスワードは、パスワード管理ツールなど安全な場所に保管し、共有フォルダやリポジトリに置かないでください。
+
+**⑥ App Store Connect へのアップロード**：成果物 `ios-signed` の `.ipa` を、Macの Transporter アプリでアップロードします（Macがない場合は、自動アップロードの追加設定が必要です）。
+
+**Macで手元からビルドする場合**は、Xcodeの自動署名（「3-2」）を使うか、`ios/Flutter/Signing.xcconfig`（Gitには登録されません）に次のように書くとCIと同じ手動署名でビルドできます。
+
+```
+CODE_SIGN_STYLE = Manual
+DEVELOPMENT_TEAM = ABCDE12345
+PROVISIONING_PROFILE_SPECIFIER = BACCHUS App Store
+CODE_SIGN_IDENTITY = Apple Distribution
+```
 
 macOSの実行環境はGitHubの無料枠の消費が大きい（Linuxの約10倍）ため、私用リポジトリでは利用時間に注意してください。
 
@@ -200,5 +264,5 @@ macOSの実行環境はGitHubの無料枠の消費が大きい（Linuxの約10�
 ## 7. 既知の注意点
 
 - **flutter_web_auth_2 と Kotlin**：Androidのビルド時に「Your app uses the following plugins that apply Kotlin Gradle Plugin (KGP): flutter_web_auth_2」という警告が出ます。現在のFlutter（3.47）ではビルドできますが、将来のFlutterでは失敗する予定です。Flutterを更新する前に、SSO用プラグイン flutter_web_auth_2 が対応版（Built-in Kotlin対応）を出しているか確認してください。対応版が出ない場合は、SSOの画面表示を url_launcher と app_links の組み合わせに置き換えます（変更箇所は `lib/src/session.dart` の `systemBrowser` だけです）。
-- **このリポジトリでの確認状況**：Androidのリリースビルド（APK）は開発環境で成功し、署名設定（key.properties）での署名も確認済みです。iOSはMacまたはGitHub Actionsでの確認が必要です。
+- **このリポジトリでの確認状況**：Androidのリリースビルドと key.properties による署名は開発環境とGitHub Actionsで確認済みです。iOSは署名なしのビルドをGitHub Actions（macOS）で確認済みです。iOSの署名付きビルドは、実際の証明書とプロファイルを登録した最初の実行で確認してください（このリポジトリの開発環境には証明書がないため未実行です）。
 

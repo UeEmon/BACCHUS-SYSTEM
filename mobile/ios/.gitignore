@@ -32,3 +32,6 @@ Runner/GeneratedPluginRegistrant.*
 !default.mode2v3
 !default.pbxuser
 !default.perspectivev3
+
+# Signing settings written by CI or a developer (see docs/BUILD_SETUP.md)
+Flutter/Signing.xcconfig

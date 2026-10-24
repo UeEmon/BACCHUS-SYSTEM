@@ -1,4 +1,4 @@
-package jp.bacchus.bacchus_mobile
+package jp.bacchus.app
 
 import io.flutter.embedding.android.FlutterFragmentActivity
 

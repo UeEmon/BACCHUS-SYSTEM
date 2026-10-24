@@ -16,7 +16,7 @@ if (keystorePropertiesFile.exists()) {
 }
 
 android {
-    namespace = "jp.bacchus.bacchus_mobile"
+    namespace = "jp.bacchus.app"
     compileSdk = flutter.compileSdkVersion
     ndkVersion = flutter.ndkVersion
 
@@ -27,7 +27,7 @@ android {
 
     defaultConfig {
         // Change to your organization's ID before the first Google Play release; it cannot change afterwards.
-        applicationId = "jp.bacchus.bacchus_mobile"
+        applicationId = "jp.bacchus.app"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
         // Android 9: Keystore keys that strictly require biometric authentication.

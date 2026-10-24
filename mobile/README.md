@@ -55,7 +55,7 @@ flutter build appbundle --release  # Google Play用
 
 - 最小バージョンはAndroid 9（API 28）です。
 - リリース署名：鍵を作成して`android/key.properties`を置くと、その鍵で署名されます（ない場合はデバッグ署名）。手順はdocs/BUILD_SETUP.mdの「2-3」。
-- アプリIDは`jp.bacchus.bacchus_mobile`です。公開前に組織のドメインに合わせて変更してください。
+- アプリIDは`jp.bacchus.app`です（iOSのBundle IDも同じ）。
 
 ### iOS（macOSとXcodeが必要）
 
@@ -64,7 +64,7 @@ cd ios && pod install && cd ..
 flutter build ipa --release
 ```
 
-- Xcodeで`Runner`のSigning & Capabilitiesにチーム（Apple Developer Program）を設定します。
+- Xcodeで`Runner`のSigning & Capabilitiesにチーム（Apple Developer Program）を設定します。GitHub Actionsでの署名付きビルドは docs/BUILD_SETUP.md の「5-2」を参照してください。
 - Face ID・カメラ・写真の利用目的は`ios/Runner/Info.plist`に記載済みです。
 - App Store Connectでアプリを登録し、TestFlightで確認してから審査に提出します。手順：https://docs.flutter.dev/deployment/ios
 
