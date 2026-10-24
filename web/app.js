@@ -54,16 +54,22 @@ const admin=createAdmin({$,esc,guard,toast,api:()=>api});
 function showSession(){const s=session;role=s?.role||'';tenantName=s?.tenant?.name||'';$('#loggedOut').hidden=Boolean(s);$('#loggedIn').hidden=!s;
   $('#sessionInfo').textContent=s?`${s.user}${s.email?`（${s.email}）`:''}・${ROLES[role]||role}${tenantName?`・${tenantName}`:''}としてログイン中`:'';
   $('#openAdmin').hidden=!['system_admin','tenant_admin'].includes(role);$('#openAdmin').textContent=role==='system_admin'?'テナント管理':'テナントの管理（利用者・ログイン方式・AI利用量・監査ログ）';
-  $('#openPassword').hidden=s?.source!=='session';$('#aiForm').hidden=role!=='tenant_admin';}
+  $('#openPassword').hidden=s?.source!=='session';$('#openSecurity').hidden=s?.source!=='session';$('#aiForm').hidden=role!=='tenant_admin';}
 async function useShared(){if(!session?.workspace)throw new Error('共用の在庫を使うには、テナントの利用者でログインしてください');localStorage.setItem('bacchus-workspace',session.workspace);repo=new ServerRepository(api,session.workspace);mode='shared';actor=session.user;localStorage.setItem('bacchus-mode',mode);state=await repo.read();}
 async function usePersonal(){repo=new LocalRepository();mode='personal';actor='個人';localStorage.setItem('bacchus-mode',mode);state=await repo.read();}
 async function signedIn(token){const client=new ApiClient(token),info=await client.request('/api/session');api=client;session=info;sessionStorage.setItem('bacchus-token',token);sessionStorage.setItem('bacchus-session',JSON.stringify(info));showSession();$('#settingsDialog').close();
   if(info.mustChangePassword){openPassword(true);return;}
+  if(info.mfaSetupRequired){await openSecurity(true);return;}
   if(info.workspace)await useShared();else await usePersonal();await render();toast(`${info.user}としてログインしました`);}
 async function signOut(){try{await api.request('/api/auth/logout',{method:'POST',body:'{}'});}catch{}api=new ApiClient('');session=null;sessionStorage.removeItem('bacchus-token');sessionStorage.removeItem('bacchus-session');showSession();await usePersonal();await render();}
 function openPassword(forced){$('#passwordForm').reset();$('#passwordReason').textContent=forced?'初回ログインのため、一時パスワードを新しいパスワードに変更してください。':'';$('#passwordCancel').hidden=forced;$('#passwordDialog').showModal();}
 $('#settingsButton').onclick=()=>{$('#storageMode').value=mode;$('#aiKey').value='';showSession();$('#settingsDialog').showModal();if(role==='tenant_admin')loadAiSettings();};
-$('#loginForm').onsubmit=e=>{e.preventDefault();guard(async()=>{const result=await new ApiClient('').request('/api/auth/login',{method:'POST',body:JSON.stringify({email:$('#loginEmail').value,password:$('#loginPassword').value})});$('#loginPassword').value='';await signedIn(result.session);if(role==='tenant_admin'&&!session.mustChangePassword)loadAiSettings();});};
+let challenge='';
+function showMfaStep(on){$('#loginForm').hidden=on;$('#mfaForm').hidden=!on;if(on){$('#mfaCode').value='';$('#mfaCode').focus();}}
+$('#loginForm').onsubmit=e=>{e.preventDefault();guard(async()=>{const result=await new ApiClient('').request('/api/auth/login',{method:'POST',body:JSON.stringify({email:$('#loginEmail').value,password:$('#loginPassword').value})});$('#loginPassword').value='';
+  if(result.mfaRequired){challenge=result.challenge;showMfaStep(true);return;}await signedIn(result.session);});};
+$('#mfaForm').onsubmit=e=>{e.preventDefault();guard(async()=>{try{const result=await new ApiClient('').request('/api/auth/mfa/verify',{method:'POST',body:JSON.stringify({challenge,code:$('#mfaCode').value})});challenge='';showMfaStep(false);await signedIn(result.session);}catch(error){if(/もう一度ログイン|有効期限/.test(error.message))showMfaStep(false);throw error;}});};
+$('#mfaCancel').onclick=()=>{challenge='';showMfaStep(false);};
 $('#ssoLogin').onclick=()=>guard(async()=>{const email=$('#loginEmail').value.trim();if(!email)throw new Error('メールアドレスを入力してください');const result=await new ApiClient('').request('/api/auth/sso/start',{method:'POST',body:JSON.stringify({email})});location.assign(result.url);});
 $('#tokenForm').onsubmit=e=>{e.preventDefault();guard(async()=>{await signedIn($('#token').value.trim());$('#token').value='';});};
 $('#logout').onclick=()=>guard(async()=>{await signOut();toast('ログアウトしました');});
@@ -73,6 +79,26 @@ $('#passwordCancel').onclick=()=>$('#passwordDialog').close();
 $('#passwordDialog').addEventListener('cancel',e=>{if(session?.mustChangePassword)e.preventDefault();});
 $('#passwordForm').onsubmit=e=>{e.preventDefault();const f=Object.fromEntries(new FormData(e.target));guard(async()=>{if(f.newPassword!==f.confirm)throw new Error('確認用のパスワードが一致しません');await api.request('/api/auth/password',{method:'POST',body:JSON.stringify({currentPassword:f.currentPassword,newPassword:f.newPassword})});const forced=session.mustChangePassword;$('#passwordDialog').close();toast('パスワードを変更しました');if(forced)await signedIn(api.token);});};
 $('#openAdmin').onclick=()=>admin.open(role==='system_admin'?'system':'tenant');
+// Multi-factor sign-in and the phones registered for biometric sign-in.
+let securityForced=false;
+async function openSecurity(forced){securityForced=forced;$('#securityReason').hidden=!forced;$('#mfaSetup').hidden=true;$('#recoveryCodes').hidden=true;$('#settingsDialog').close();await loadSecurity();$('#securityDialog').showModal();}
+async function loadSecurity(){const mfa=await api.request('/api/auth/mfa');
+  $('#mfaStatus').textContent=mfa.enabled?`設定済み（回復コード残り${mfa.recoveryCodesLeft}個）${mfa.required?'。このアカウントでは必須です。':''}`:mfa.required?'未設定（このアカウントでは必須です）':'未設定（任意）';
+  $('#mfaStart').hidden=mfa.enabled;$('#mfaRegenerate').hidden=!mfa.enabled;$('#mfaDisable').hidden=!mfa.enabled||mfa.required;
+  $('#deviceSection').hidden=securityForced;if(securityForced)return;
+  const devices=await api.request('/api/auth/devices');
+  $('#deviceList').innerHTML=devices.map(d=>`<li><div><b>${esc(d.name)}</b> <span class="badge">${esc(d.platform)}</span><br><small class="muted">登録 ${esc(new Date(d.createdAt).toLocaleString('ja-JP'))}${d.lastUsedAt?` ・ 最終利用 ${esc(new Date(d.lastUsedAt).toLocaleString('ja-JP'))}`:''}</small></div><div class="actions"><button class="quiet" data-revoke-device="${esc(d.id)}" data-name="${esc(d.name)}">登録解除</button></div></li>`).join('')||'<li class="muted">登録された端末はありません。専用アプリでログインすると登録できます。</li>';}
+function showRecoveryCodes(codes){$('#recoveryCodes').hidden=false;$('#recoveryCodes').innerHTML=`<p><b>回復コード</b>：認証アプリを使えないときに、確認コードの代わりに1回ずつ使えます。今だけ表示します。安全な場所に保管してください。</p><pre class="codes">${codes.map(esc).join('\n')}</pre><button type="button" id="copyCodes" class="secondary full">コピー</button>`;}
+$('#openSecurity').onclick=()=>guard(()=>openSecurity(false));
+$('#securityClose').onclick=()=>guard(async()=>{if(securityForced&&!(await api.request('/api/auth/mfa')).enabled)throw new Error('多要素認証の設定が必要です。設定しない場合はログアウトしてください');$('#securityDialog').close();if(securityForced){securityForced=false;await signedIn(api.token);}});
+$('#securityDialog').addEventListener('cancel',e=>{if(securityForced)e.preventDefault();});
+$('#mfaStart').onclick=()=>guard(async()=>{const setup=await api.request('/api/auth/mfa/setup',{method:'POST',body:'{}'});$('#mfaQr').innerHTML=setup.qrSvg;$('#mfaSecret').textContent=setup.secret.replace(/(.{4})/g,'$1 ').trim();$('#mfaLink').href=setup.uri;$('#mfaSetup').hidden=false;$('#mfaStart').hidden=true;});
+$('#mfaEnableForm').onsubmit=e=>{e.preventDefault();guard(async()=>{const result=await api.request('/api/auth/mfa/enable',{method:'POST',body:JSON.stringify({code:e.target.elements.code.value})});e.target.reset();$('#mfaSetup').hidden=true;showRecoveryCodes(result.recoveryCodes);await loadSecurity();toast('多要素認証を設定しました。回復コードを保管してから閉じてください');});};
+$('#mfaRegenerate').onclick=()=>guard(async()=>{const code=prompt('認証アプリの6桁のコード、または未使用の回復コードを入力してください');if(!code)return;const result=await api.request('/api/auth/mfa/recovery-codes',{method:'POST',body:JSON.stringify({code})});showRecoveryCodes(result.recoveryCodes);await loadSecurity();});
+$('#mfaDisable').onclick=()=>guard(async()=>{const code=prompt('多要素認証を無効にします。認証アプリの6桁のコード、または回復コードを入力してください');if(!code)return;await api.request('/api/auth/mfa/disable',{method:'POST',body:JSON.stringify({code})});$('#recoveryCodes').hidden=true;await loadSecurity();toast('多要素認証を無効にしました');});
+$('#securityDialog').addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;
+  if(b.id==='copyCodes')guard(async()=>{await navigator.clipboard.writeText($('#recoveryCodes pre').textContent);toast('回復コードをコピーしました');});
+  if(b.dataset.revokeDevice)guard(async()=>{if(!confirm(`「${b.dataset.name}」の登録を解除します。その端末では生体認証でログインできなくなります。よろしいですか？`))return;await api.request('/api/auth/devices/revoke',{method:'POST',body:JSON.stringify({deviceId:b.dataset.revokeDevice})});await loadSecurity();toast('登録を解除しました');});});
 const AI={gemini:{key:'Google AI Studioで発行したキー',auto:'最新の安定版Flash-Lite（速く安価）'},claude:{key:'Claude Consoleで発行したキー',auto:'最新のHaiku（速く安価）'},openai:{key:'OpenAI Platformで発行したキー',auto:'最新のnano（速く安価）'}};let aiSettings=null;
 function showAiProvider(){const id=$('#aiProvider').value,ai=aiSettings?.providers.find(p=>p.id===id),sources={web:'この画面で設定',env:'サーバーの環境変数で設定',none:'未設定'};$('#aiKeyLabel').textContent=`${ai?.label||''} APIキー`;$('#aiKey').placeholder=AI[id].key;$('#aiModel').innerHTML=`<option value="auto">自動（推奨）：${AI[id].auto}</option>${(ai?.models||[]).map(m=>`<option value="${esc(m)}">${esc(m)}</option>`).join('')}`;$('#aiModel').value=!ai||ai.auto||!ai.models.includes(ai.model)?'auto':ai.model;$('#aiClear').hidden=ai?.source!=='web';if(!aiSettings)return;const active=aiSettings.providers.find(p=>p.id===aiSettings.provider);$('#aiSettingsStatus').textContent=(active.configured?`読み取りに使用中：${active.label}・${active.model}`:'未設定です。AIサービスを選んでAPIキーを保存してください')+(ai.configured?`。${ai.label}：${ai.model}（${ai.auto?'自動選択':'手動選択'}・${sources[ai.source]}${ai.keyHint?`・キー ${ai.keyHint}`:''}）`:`。${ai.label}：未設定`);}
 function showAiSettings(ai){aiSettings=ai;$('#aiProvider').value=ai.provider;showAiProvider();}

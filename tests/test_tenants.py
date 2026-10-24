@@ -138,8 +138,14 @@ class AdministrationTests(Server):
         # Recovery: a new administrator for a tenant whose administrators are gone.
         extra=self.call('/api/system',self.system,{'action':'addTenantAdmin','tenantId':a['id'],'name':'復旧','email':'recover@example.com'})
         self.assertEqual(self.call('/api/session',self.login('recover@example.com',extra['temporaryPassword']))['role'],'tenant_admin')
-        actions=[e['action'] for e in self.call('/api/system',self.system)['audit']]
-        self.assertEqual(actions[:4],['tenant.add_admin','tenant.rename','tenant.create','tenant.create'])
+        system_events=[e['action'] for e in self.call('/api/system?audit=system',self.system)['audit']]
+        self.assertEqual(system_events[:4],['tenant.add_admin','tenant.rename','tenant.create','tenant.create'])
+        # The system administrator reads every tenant's events; tenant administrators only their own.
+        everything=self.call('/api/system',self.system)['audit']
+        self.assertTrue({'A店（本店）','B店'}<={e['tenant'] for e in everything if e['tenant']})
+        self.assertEqual({e['tenant'] for e in self.call(f'/api/system?audit={b["id"]}',self.system)['audit']},{'B店'})
+        a_events=self.call('/api/tenant',a_admin)['audit']
+        self.assertTrue(a_events and all(e['tenantId']==a['id'] for e in a_events))
     def test_tenant_deletion_removes_everything(self):
         a,a_admin=self.tenant('A店','a@example.com');_,b_admin=self.tenant('B店','b@example.com')
         member=self.add_user(a_admin,'m@example.com')
@@ -197,19 +203,24 @@ class AiTests(Server):
             status=self.call('/api/ai-settings',a_admin,{'provider':'gemini','apiKey':'AIzaTestKey_0123456789abcdef','model':'auto'})
         self.assertEqual(status['model'],'gemini-3.5-flash-lite')
         self.assertTrue(self.call('/api/session',member)['aiConfigured']);self.assertFalse(self.call('/api/session',b_admin)['aiConfigured'])
-        self.call('/api/tenant',a_admin,{'action':'setAiLimit','limit':5})
-        self.call('/api/system',self.system,{'action':'setAiCap','tenantId':a['id'],'cap':2})
+        self.call('/api/tenant',a_admin,{'action':'setAiLimit','limit':2})
+        # AI limits are the tenant's: the system administrator has no say.
+        self.assertEqual(self.status('/api/system',self.system,{'action':'setAiCap','tenantId':a['id'],'cap':100}),409)
+        self.assertEqual(self.status('/api/tenant',member,{'action':'setAiLimit','limit':100}),403)
         with patch('server.recognition.fetch',side_effect=lambda req,timeout:json.load(self.answer())):
             for _ in range(2):self.assertEqual(self.call('/api/recognize',member,{'photo':PHOTO})['name'],'試験酒')
             self.assertEqual(self.status('/api/recognize',member,{'photo':PHOTO}),429)
         usage=self.call('/api/tenant',a_admin)['usage']
-        self.assertEqual((usage['used'],usage['limit'],usage['cap'],usage['effectiveLimit']),(2,5,2,2))
+        self.assertEqual((usage['used'],usage['limit']),(2,2));self.assertNotIn('cap',usage)
         ok=next(s for s in usage['summary'] if s['status']=='ok')
         self.assertEqual((ok['count'],ok['inputTokens'],ok['outputTokens']),(2,2400,80))
         self.assertEqual([r['status'] for r in usage['recent']],['rejected','ok','ok'])
         self.assertEqual(self.call('/api/system',self.system)['tenants'][0]['aiThisMonth'],2)
         self.assertIn('settings.ai',[e['action'] for e in self.call('/api/tenant',a_admin)['audit']])
-        self.assertEqual(self.status('/api/system',self.system,{'action':'setAiCap','tenantId':a['id'],'cap':-1}),409)
+        self.assertEqual(self.status('/api/tenant',a_admin,{'action':'setAiLimit','limit':-1}),409)
+        # The key is stored encrypted and bound to this tenant.
+        with sqlite3.connect(self.db) as db:stored=db.execute("SELECT value FROM tenant_settings WHERE key='gemini_api_key'").fetchone()[0]
+        self.assertTrue(stored.startswith('enc:v1:'));self.assertNotIn('AIzaTestKey',stored)
 
 class EnvAndUpgradeTests(unittest.TestCase):
     def test_env_roles(self):

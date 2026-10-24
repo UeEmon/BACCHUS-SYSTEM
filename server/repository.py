@@ -9,20 +9,21 @@ from pathlib import Path
 from .domain import InventoryService, empty_state
 
 DEFAULT_TENANT='default'
-SCHEMA_VERSION=2
+SCHEMA_VERSION=3
 SCHEMA='''
 CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS tenants (id TEXT PRIMARY KEY, name TEXT NOT NULL, workspace TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, ai_monthly_cap INTEGER);
+CREATE TABLE IF NOT EXISTS tenants (id TEXT PRIMARY KEY, name TEXT NOT NULL, workspace TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS tenant_settings (tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE, key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY (tenant_id,key));
 CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY, tenant_id TEXT REFERENCES tenants(id) ON DELETE CASCADE, email TEXT NOT NULL UNIQUE, name TEXT NOT NULL,
   role TEXT NOT NULL CHECK (role IN ('system_admin','tenant_admin','member')), password_hash TEXT, must_change_password INTEGER NOT NULL DEFAULT 0,
   sso_subject TEXT, disabled INTEGER NOT NULL DEFAULT 0, failed_logins INTEGER NOT NULL DEFAULT 0, locked_until TEXT,
-  created_at TEXT NOT NULL, last_login_at TEXT, CHECK ((role='system_admin')=(tenant_id IS NULL)));
+  created_at TEXT NOT NULL, last_login_at TEXT, mfa_secret TEXT, mfa_enabled INTEGER NOT NULL DEFAULT 0, mfa_last_step INTEGER NOT NULL DEFAULT 0,
+  CHECK ((role='system_admin')=(tenant_id IS NULL)));
 CREATE INDEX IF NOT EXISTS users_tenant ON users(tenant_id);
-CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, created_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, expires_at TEXT NOT NULL, ip TEXT NOT NULL, user_agent TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, created_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, expires_at TEXT NOT NULL, ip TEXT NOT NULL, user_agent TEXT NOT NULL, method TEXT NOT NULL DEFAULT 'password');
 CREATE INDEX IF NOT EXISTS sessions_user ON sessions(user_id);
-CREATE TABLE IF NOT EXISTS sso_requests (state_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, nonce TEXT NOT NULL, verifier TEXT NOT NULL, expires_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS sso_requests (state_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, nonce TEXT NOT NULL, verifier TEXT NOT NULL, expires_at TEXT NOT NULL, client TEXT NOT NULL DEFAULT 'web');
 CREATE TABLE IF NOT EXISTS login_codes (code_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, expires_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS refrigerators (tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE, id TEXT NOT NULL, name TEXT NOT NULL, position INTEGER NOT NULL, PRIMARY KEY (tenant_id,id));
 CREATE TABLE IF NOT EXISTS bottles (
@@ -36,26 +37,33 @@ CREATE TABLE IF NOT EXISTS ai_usage (id INTEGER PRIMARY KEY AUTOINCREMENT, tenan
 CREATE INDEX IF NOT EXISTS ai_usage_tenant_at ON ai_usage(tenant_id,at);
 CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, tenant_id TEXT, actor_id TEXT NOT NULL, actor_name TEXT NOT NULL, action TEXT NOT NULL, target TEXT NOT NULL, detail TEXT NOT NULL, ip TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS audit_tenant ON audit_log(tenant_id,id);
+CREATE TABLE IF NOT EXISTS recovery_codes (user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, code_hash TEXT NOT NULL, used_at TEXT, PRIMARY KEY (user_id,code_hash));
+CREATE TABLE IF NOT EXISTS mfa_challenges (token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, client TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, expires_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS devices (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, name TEXT NOT NULL, platform TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, previous_hash TEXT, created_at TEXT NOT NULL, last_used_at TEXT, last_ip TEXT NOT NULL DEFAULT '');
+CREATE INDEX IF NOT EXISTS devices_user ON devices(user_id);
 '''
+# Secrets stored encrypted, with the context their ciphertext is bound to.
+SECRET_SETTINGS=('gemini_api_key','claude_api_key','openai_api_key','sso_client_secret')
 BOTTLE_COLUMNS=(('id','id'),('name','name'),('brewery','brewery'),('category','category'),('productionDate','production_date'),('volume','volume'),('remaining','remaining'),
                 ('fridgeId','fridge_id'),('shelf','shelf'),('receivedAt','received_at'),('openedAt','opened_at'),('version','version'),('importOrigin','import_origin'))
-USER_COLUMNS='id,tenant_id,email,name,role,password_hash,must_change_password,sso_subject,disabled,failed_logins,locked_until,created_at,last_login_at'
+USER_COLUMNS='id,tenant_id,email,name,role,password_hash,must_change_password,sso_subject,disabled,failed_logins,locked_until,created_at,last_login_at,mfa_secret,mfa_enabled,mfa_last_step'
 
 def now():
     return datetime.now(timezone.utc).isoformat()
 
 def user_row(r):
-    keys=('id','tenantId','email','name','role','passwordHash','mustChangePassword','ssoSubject','disabled','failedLogins','lockedUntil','createdAt','lastLoginAt')
+    keys=('id','tenantId','email','name','role','passwordHash','mustChangePassword','ssoSubject','disabled','failedLogins','lockedUntil','createdAt','lastLoginAt','mfaSecret','mfaEnabled','mfaLastStep')
     user=dict(zip(keys,r))
-    for key in ('mustChangePassword','disabled'):user[key]=bool(user[key])
+    for key in ('mustChangePassword','disabled','mfaEnabled'):user[key]=bool(user[key])
     return user
 
 def without_photo(bottle):
     return {k:v for k,v in bottle.items() if k!='photo'} if isinstance(bottle,dict) else bottle
 
 class SQLiteRepository:
-    def __init__(self, path):
+    def __init__(self, path, box=None):
         self.path=path
+        self.box=box
         Path(path).parent.mkdir(parents=True,exist_ok=True)
         db=sqlite3.connect(path,timeout=30,isolation_level=None)
         try:
@@ -100,6 +108,11 @@ class SQLiteRepository:
         # executescript() would commit first; single statements keep the upgrade in one transaction.
         for statement in SCHEMA.split(';'):
             if statement.strip():db.execute(statement)
+        # v2 to v3: multi-factor sign-in, device sign-in for the app; AI limits became the tenant's alone.
+        for table,column,ddl in (('users','mfa_secret','TEXT'),('users','mfa_enabled','INTEGER NOT NULL DEFAULT 0'),('users','mfa_last_step','INTEGER NOT NULL DEFAULT 0'),
+                                 ('sessions','method',"TEXT NOT NULL DEFAULT 'password'"),('sso_requests','client',"TEXT NOT NULL DEFAULT 'web'")):
+            if column not in self.table_columns(db,table):db.execute(f'ALTER TABLE {table} ADD COLUMN {column} {ddl}')
+        if 'ai_monthly_cap' in self.table_columns(db,'tenants'):db.execute('ALTER TABLE tenants DROP COLUMN ai_monthly_cap')
         for t in legacy:
             db.execute('INSERT INTO tenants (id,name,workspace,created_at) VALUES (?,?,?,?)',(t['id'],t['name'],t['workspace'],t['created_at']))
             self.write_state(db,t['id'],empty_state(),json.loads(t['data']))
@@ -113,23 +126,23 @@ class SQLiteRepository:
     # Tenants
     def tenants(self):
         with self.transaction() as db:
-            return [self.tenant_row(r) for r in db.execute('SELECT id,name,workspace,created_at,ai_monthly_cap FROM tenants ORDER BY created_at,id')]
+            return [self.tenant_row(r) for r in db.execute('SELECT id,name,workspace,created_at FROM tenants ORDER BY created_at,id')]
     def tenant(self, tenant_id):
         with self.transaction() as db:
-            r=db.execute('SELECT id,name,workspace,created_at,ai_monthly_cap FROM tenants WHERE id=?',(tenant_id,)).fetchone()
+            r=db.execute('SELECT id,name,workspace,created_at FROM tenants WHERE id=?',(tenant_id,)).fetchone()
             return self.tenant_row(r) if r else None
     @staticmethod
     def tenant_row(r):
-        return dict(id=r[0],name=r[1],workspace=r[2],createdAt=r[3],aiMonthlyCap=r[4])
+        return dict(id=r[0],name=r[1],workspace=r[2],createdAt=r[3])
     def create_tenant(self, name, tenant_id=None, admin=None):
         """Creates a tenant, optionally with its first administrator (dict for create_user), atomically."""
-        tenant=dict(id=tenant_id or str(uuid.uuid4()),name=name,workspace=str(uuid.uuid4()),createdAt=now(),aiMonthlyCap=None)
+        tenant=dict(id=tenant_id or str(uuid.uuid4()),name=name,workspace=str(uuid.uuid4()),createdAt=now())
         with self.transaction(True) as db:
             db.execute('INSERT INTO tenants (id,name,workspace,created_at) VALUES (?,?,?,?)',(tenant['id'],name,tenant['workspace'],tenant['createdAt']))
             if admin:self.insert_user(db,dict(admin,tenantId=tenant['id']))
         return tenant
     def update_tenant(self, tenant_id, **fields):
-        columns={'name':'name','aiMonthlyCap':'ai_monthly_cap'}
+        columns={'name':'name'}
         with self.transaction(True) as db:
             for key,value in fields.items():db.execute(f'UPDATE tenants SET {columns[key]}=? WHERE id=?',(value,tenant_id))
     def delete_tenant(self, tenant_id):
@@ -174,36 +187,37 @@ class SQLiteRepository:
         return user
     def update_user(self, user_id, **fields):
         columns={'name':'name','email':'email','role':'role','passwordHash':'password_hash','mustChangePassword':'must_change_password','ssoSubject':'sso_subject',
-                 'disabled':'disabled','failedLogins':'failed_logins','lockedUntil':'locked_until','lastLoginAt':'last_login_at'}
+                 'disabled':'disabled','failedLogins':'failed_logins','lockedUntil':'locked_until','lastLoginAt':'last_login_at',
+                 'mfaSecret':'mfa_secret','mfaEnabled':'mfa_enabled','mfaLastStep':'mfa_last_step'}
         with self.transaction(True) as db:
             for key,value in fields.items():db.execute(f'UPDATE users SET {columns[key]}=? WHERE id=?',(int(value) if isinstance(value,bool) else value,user_id))
     def delete_user(self, user_id):
         with self.transaction(True) as db:db.execute('DELETE FROM users WHERE id=?',(user_id,))
-    def create_session(self, token_hash, user_id, expires_at, ip, user_agent):
+    def create_session(self, token_hash, user_id, expires_at, ip, user_agent, method):
         at=now()
         with self.transaction(True) as db:
             db.execute('DELETE FROM sessions WHERE expires_at<?',(at,))
-            db.execute('INSERT INTO sessions VALUES (?,?,?,?,?,?,?)',(token_hash,user_id,at,at,expires_at,ip,user_agent[:300]))
+            db.execute('INSERT INTO sessions (token_hash,user_id,created_at,last_seen_at,expires_at,ip,user_agent,method) VALUES (?,?,?,?,?,?,?,?)',(token_hash,user_id,at,at,expires_at,ip,user_agent[:300],method))
     def session(self, token_hash):
         with self.transaction() as db:
-            r=db.execute('SELECT user_id,created_at,last_seen_at,expires_at FROM sessions WHERE token_hash=?',(token_hash,)).fetchone()
-            return dict(userId=r[0],createdAt=r[1],lastSeenAt=r[2],expiresAt=r[3]) if r else None
+            r=db.execute('SELECT user_id,created_at,last_seen_at,expires_at,method FROM sessions WHERE token_hash=?',(token_hash,)).fetchone()
+            return dict(userId=r[0],createdAt=r[1],lastSeenAt=r[2],expiresAt=r[3],method=r[4]) if r else None
     def touch_session(self, token_hash, last_seen_at, expires_at):
         with self.transaction(True) as db:db.execute('UPDATE sessions SET last_seen_at=?,expires_at=? WHERE token_hash=?',(last_seen_at,expires_at,token_hash))
     def delete_sessions(self, token_hash=None, user_id=None, keep=''):
         with self.transaction(True) as db:
             if token_hash:db.execute('DELETE FROM sessions WHERE token_hash=?',(token_hash,))
             else:db.execute('DELETE FROM sessions WHERE user_id=? AND token_hash!=?',(user_id,keep))
-    def save_sso_request(self, state_hash, user_id, nonce, verifier, expires_at):
+    def save_sso_request(self, state_hash, user_id, nonce, verifier, expires_at, client):
         with self.transaction(True) as db:
             db.execute('DELETE FROM sso_requests WHERE expires_at<?',(now(),))
-            db.execute('INSERT INTO sso_requests VALUES (?,?,?,?,?)',(state_hash,user_id,nonce,verifier,expires_at))
+            db.execute('INSERT INTO sso_requests (state_hash,user_id,nonce,verifier,expires_at,client) VALUES (?,?,?,?,?,?)',(state_hash,user_id,nonce,verifier,expires_at,client))
     def take_sso_request(self, state_hash):
         """One use only: the request is removed as it is read."""
         with self.transaction(True) as db:
-            r=db.execute('SELECT user_id,nonce,verifier,expires_at FROM sso_requests WHERE state_hash=?',(state_hash,)).fetchone()
+            r=db.execute('SELECT user_id,nonce,verifier,expires_at,client FROM sso_requests WHERE state_hash=?',(state_hash,)).fetchone()
             db.execute('DELETE FROM sso_requests WHERE state_hash=?',(state_hash,))
-            return dict(userId=r[0],nonce=r[1],verifier=r[2],expiresAt=r[3]) if r and r[3]>now() else None
+            return dict(userId=r[0],nonce=r[1],verifier=r[2],expiresAt=r[3],client=r[4]) if r and r[3]>now() else None
     def save_login_code(self, code_hash, user_id, expires_at):
         with self.transaction(True) as db:
             db.execute('DELETE FROM login_codes WHERE expires_at<?',(now(),))
@@ -280,11 +294,77 @@ class SQLiteRepository:
         with self.transaction(True) as db:
             db.execute('INSERT INTO audit_log (at,tenant_id,actor_id,actor_name,action,target,detail,ip) VALUES (?,?,?,?,?,?,?,?)',
                        (now(),tenant_id,actor.get('id',''),actor.get('name',''),action,target,json.dumps(detail or {},ensure_ascii=False),ip))
-    def audit_log(self, tenant_id, limit=200):
+    def audit_log(self, scope, limit=200):
+        """scope: a tenant ID for that tenant's events, 'system' for events outside tenants, '*' for all."""
+        where,args={'*':('1=1',()),'system':('a.tenant_id IS NULL',())}.get(scope,('a.tenant_id=?',(scope,)))
         with self.transaction() as db:
-            rows=db.execute('SELECT at,actor_name,action,target,detail,ip FROM audit_log WHERE '+('tenant_id IS NULL' if tenant_id is None else 'tenant_id=?')+' ORDER BY id DESC LIMIT ?',
-                            (limit,) if tenant_id is None else (tenant_id,limit))
-            return [dict(at=r[0],actor=r[1],action=r[2],target=r[3],detail=json.loads(r[4]),ip=r[5]) for r in rows]
+            rows=db.execute(f'SELECT a.at,a.actor_name,a.action,a.target,a.detail,a.ip,a.tenant_id,t.name FROM audit_log a LEFT JOIN tenants t ON t.id=a.tenant_id WHERE {where} ORDER BY a.id DESC LIMIT ?',(*args,limit))
+            return [dict(at=r[0],actor=r[1],action=r[2],target=r[3],detail=json.loads(r[4]),ip=r[5],tenantId=r[6],tenant=r[7]) for r in rows]
+
+    # Multi-factor sign-in
+    def replace_recovery_codes(self, user_id, code_hashes):
+        with self.transaction(True) as db:
+            db.execute('DELETE FROM recovery_codes WHERE user_id=?',(user_id,))
+            db.executemany('INSERT INTO recovery_codes (user_id,code_hash) VALUES (?,?)',[(user_id,h) for h in code_hashes])
+    def use_recovery_code(self, user_id, code_hash):
+        with self.transaction(True) as db:
+            return db.execute('UPDATE recovery_codes SET used_at=? WHERE user_id=? AND code_hash=? AND used_at IS NULL',(now(),user_id,code_hash)).rowcount==1
+    def recovery_codes_left(self, user_id):
+        with self.transaction() as db:
+            return db.execute('SELECT COUNT(*) FROM recovery_codes WHERE user_id=? AND used_at IS NULL',(user_id,)).fetchone()[0]
+    def save_challenge(self, token_hash, user_id, client, expires_at):
+        with self.transaction(True) as db:
+            db.execute('DELETE FROM mfa_challenges WHERE expires_at<? OR user_id=?',(now(),user_id))
+            db.execute('INSERT INTO mfa_challenges (token_hash,user_id,client,expires_at) VALUES (?,?,?,?)',(token_hash,user_id,client,expires_at))
+    def challenge(self, token_hash):
+        with self.transaction(True) as db:
+            r=db.execute('SELECT user_id,client,attempts,expires_at FROM mfa_challenges WHERE token_hash=?',(token_hash,)).fetchone()
+            if not r or r[3]<=now():return None
+            db.execute('UPDATE mfa_challenges SET attempts=attempts+1 WHERE token_hash=?',(token_hash,))
+            return dict(userId=r[0],client=r[1],attempts=r[2]+1)
+    def delete_challenge(self, token_hash):
+        with self.transaction(True) as db:db.execute('DELETE FROM mfa_challenges WHERE token_hash=?',(token_hash,))
+
+    # Devices (the mobile app's biometric sign-in)
+    def create_device(self, device):
+        with self.transaction(True) as db:
+            db.execute('INSERT INTO devices (id,user_id,name,platform,token_hash,created_at) VALUES (?,?,?,?,?,?)',(device['id'],device['userId'],device['name'],device['platform'],device['tokenHash'],device['createdAt']))
+    def devices(self, user_id=None, tenant_id=None):
+        with self.transaction() as db:
+            where,args=('d.user_id=?',(user_id,)) if user_id else ('u.tenant_id=?',(tenant_id,))
+            rows=db.execute(f'SELECT d.id,d.user_id,u.name,d.name,d.platform,d.created_at,d.last_used_at,d.last_ip FROM devices d JOIN users u ON u.id=d.user_id WHERE {where} ORDER BY d.created_at',args)
+            return [dict(id=r[0],userId=r[1],userName=r[2],name=r[3],platform=r[4],createdAt=r[5],lastUsedAt=r[6],lastIp=r[7]) for r in rows]
+    def device_for_token(self, device_id, token_hash):
+        """'current' when the token is the device's latest, 'previous' when an already-rotated token is replayed."""
+        with self.transaction() as db:
+            r=db.execute('SELECT user_id,token_hash,previous_hash FROM devices WHERE id=?',(device_id,)).fetchone()
+            if not r:return None,None
+            return r[0],'current' if r[1]==token_hash else 'previous' if r[2]==token_hash else None
+    def rotate_device(self, device_id, old_hash, new_hash, ip):
+        with self.transaction(True) as db:
+            return db.execute('UPDATE devices SET previous_hash=token_hash,token_hash=?,last_used_at=?,last_ip=? WHERE id=? AND token_hash=?',(new_hash,now(),ip,device_id,old_hash)).rowcount==1
+    def delete_tenant_devices(self, tenant_id):
+        with self.transaction(True) as db:db.execute('DELETE FROM devices WHERE user_id IN (SELECT id FROM users WHERE tenant_id=?)',(tenant_id,))
+    def delete_devices(self, device_id=None, user_id=None):
+        with self.transaction(True) as db:
+            return db.execute('DELETE FROM devices WHERE '+('id=?' if device_id else 'user_id=?'),(device_id or user_id,)).rowcount
+
+    # Encryption of stored secrets
+    def rewrap_secrets(self):
+        """Encrypts plain values left by earlier versions and re-encrypts values under rotated-out keys."""
+        if not self.box:return 0
+        changed=0
+        with self.transaction(True) as db:
+            marks=','.join('?'*len(SECRET_SETTINGS))
+            for tenant_id,key,value in db.execute(f'SELECT tenant_id,key,value FROM tenant_settings WHERE key IN ({marks})',SECRET_SETTINGS).fetchall():
+                if self.box.needs_rewrap(value):
+                    context=f'tenant:{tenant_id}:{key}'
+                    db.execute('UPDATE tenant_settings SET value=? WHERE tenant_id=? AND key=?',(self.box.encrypt(self.box.decrypt(value,context),context),tenant_id,key));changed+=1
+            for user_id,value in db.execute('SELECT id,mfa_secret FROM users WHERE mfa_secret IS NOT NULL').fetchall():
+                if self.box.needs_rewrap(value):
+                    context=f'user:{user_id}:mfa'
+                    db.execute('UPDATE users SET mfa_secret=? WHERE id=?',(self.box.encrypt(self.box.decrypt(value,context),context),user_id));changed+=1
+        return changed
 
 class TenantSettings:
     """The settings interface the AI recognizer uses, scoped to one tenant."""
@@ -293,8 +373,10 @@ class TenantSettings:
     def get_setting(self, key):
         with self.repository.transaction() as db:
             row=db.execute('SELECT value FROM tenant_settings WHERE tenant_id=? AND key=?',(self.tenant_id,key)).fetchone()
-            return row[0] if row else None
+        value=row[0] if row else None
+        return self.repository.box.decrypt(value,f'tenant:{self.tenant_id}:{key}') if self.repository.box and key in SECRET_SETTINGS else value
     def set_setting(self, key, value):
+        if self.repository.box and key in SECRET_SETTINGS:value=self.repository.box.encrypt(value,f'tenant:{self.tenant_id}:{key}')
         with self.repository.transaction(True) as db:db.execute('INSERT OR REPLACE INTO tenant_settings VALUES (?,?,?)',(self.tenant_id,key,value))
     def delete_setting(self, key):
         with self.repository.transaction(True) as db:db.execute('DELETE FROM tenant_settings WHERE tenant_id=? AND key=?',(self.tenant_id,key))

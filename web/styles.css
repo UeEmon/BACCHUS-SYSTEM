@@ -17,3 +17,6 @@ label.check input{width:auto}
 .stat strong{font-size:28px}
 code{overflow-wrap:anywhere;font-size:12px}
 #issuedSecret{font-family:ui-monospace,monospace;width:100%}
+.qr svg{display:block;width:min(100%,240px);height:auto;margin:8px auto}
+.codes{font-family:ui-monospace,monospace;font-size:15px;line-height:1.7;background:#fff;border-radius:10px;padding:10px 14px;column-count:2}
+.linkButton{display:block;text-align:center;padding:10px;color:var(--green);margin:6px 0 12px}

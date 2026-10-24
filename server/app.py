@@ -8,6 +8,7 @@ from .repository import SQLiteRepository
 from .recognition import RecognitionError
 from .sso import SsoError
 from .accounts import AccountService, AccessError, AuthError, LimitError, parse_env_users
+from .crypto import SecretError, load_box
 
 WEB=Path(__file__).resolve().parent.parent/'web'
 STATIC={'/':'index.html','/index.html':'index.html','/app.js':'app.js','/admin.js':'admin.js','/domain.js':'domain.js','/migration.js':'migration.js','/repositories.js':'repositories.js',
@@ -19,8 +20,12 @@ class NotFound(Exception):
 
 class Application:
     def __init__(self):
-        self.repository=SQLiteRepository(os.environ.get('DATABASE_PATH','data/bacchus.sqlite3'))
-        self.accounts=AccountService(self.repository,parse_env_users(os.environ.get('BACCHUS_USERS') or '{}'),os.environ.get('BACCHUS_PUBLIC_URL',''))
+        path=os.environ.get('DATABASE_PATH','data/bacchus.sqlite3')
+        box,self.key_source=load_box(path)
+        self.repository=SQLiteRepository(path,box)
+        # Values stored before encryption existed, or under a rotated-out key, are re-encrypted now.
+        self.repository.rewrap_secrets()
+        self.accounts=AccountService(self.repository,parse_env_users(os.environ.get('BACCHUS_USERS') or '{}'),os.environ.get('BACCHUS_PUBLIC_URL',''),os.environ.get('BACCHUS_APP_SCHEME','bacchus'))
 
 class Handler(BaseHTTPRequestHandler):
     server_version='BACCHUS'
@@ -35,23 +40,38 @@ class Handler(BaseHTTPRequestHandler):
         return (forwarded.split(',')[0].strip() or self.client_address[0])[:64]
     def agent(self):
         return self.headers.get('User-Agent','')
-    def handle_api(self,method,path,data):
+    def handle_api(self,method,path,data,query):
         accounts=self.server.application.accounts;ip=self.ip()
-        if method=='POST' and path=='/api/auth/login':return accounts.login(data.get('email'),data.get('password'),ip,self.agent())
-        if method=='POST' and path=='/api/auth/sso/start':return accounts.start_sso(data.get('email'),ip)
-        if method=='POST' and path=='/api/auth/exchange':return accounts.exchange_code(data.get('code'),ip,self.agent())
+        public={'/api/auth/login':lambda:accounts.login(data.get('email'),data.get('password'),ip,self.agent()),
+                '/api/auth/mfa/verify':lambda:accounts.verify_mfa(data.get('challenge'),data.get('code'),ip,self.agent()),
+                '/api/auth/sso/start':lambda:accounts.start_sso(data.get('email'),ip,data.get('client','web')),
+                '/api/auth/exchange':lambda:accounts.exchange_code(data.get('code'),ip,self.agent()),
+                '/api/auth/device-login':lambda:accounts.device_login(data.get('deviceId'),data.get('deviceToken'),ip,self.agent())}
+        if method=='POST' and path in public:return public[path]()
         user=accounts.authenticate(self.headers.get('Authorization',''))
         if not user:raise AuthError('ログインしてください（セッションの有効期限が切れた可能性があります）')
         if path=='/api/session':return {**accounts.session_info(user),'aiConfigured':user['tenantId'] is not None and accounts.ai_status(user)['configured']}
         if method=='POST' and path=='/api/auth/logout':accounts.logout(user,ip);return {}
         if method=='POST' and path=='/api/auth/password':accounts.change_password(user,data.get('currentPassword'),data.get('newPassword'),ip);return {}
+        # Setting up MFA is what a restricted session is for, so these come before require_ready.
+        enrollment={('GET','/api/auth/mfa'):lambda:accounts.mfa_status(user),
+                    ('POST','/api/auth/mfa/setup'):lambda:accounts.mfa_setup(user,ip),
+                    ('POST','/api/auth/mfa/enable'):lambda:accounts.mfa_enable(user,data.get('code'),ip)}
+        if (method,path) in enrollment:
+            if user.get('mustChangePassword') and user.get('method')=='password':raise AccessError('先にパスワードを変更してください')
+            return enrollment[(method,path)]()
         accounts.require_ready(user)
         routes={('GET','/api/state'):lambda:self.server.application.repository.read(accounts.tenant_of(user)),
                 ('POST','/api/commands'):lambda:accounts.execute(user,data,ip),
                 ('POST','/api/recognize'):lambda:accounts.recognize(user,data.get('photo'),ip),
                 ('GET','/api/ai-settings'):lambda:accounts.ai_status(user),
                 ('POST','/api/ai-settings'):lambda:accounts.configure_ai(user,data,ip),
-                ('GET','/api/system'):lambda:accounts.system_overview(user),
+                ('POST','/api/auth/mfa/disable'):lambda:accounts.mfa_disable(user,data.get('code'),ip) or {},
+                ('POST','/api/auth/mfa/recovery-codes'):lambda:accounts.regenerate_recovery_codes(user,data.get('code'),ip),
+                ('GET','/api/auth/devices'):lambda:accounts.list_devices(user),
+                ('POST','/api/auth/devices'):lambda:accounts.register_device(user,data.get('name'),data.get('platform'),ip),
+                ('POST','/api/auth/devices/revoke'):lambda:accounts.revoke_device(user,data.get('deviceId'),ip) or {},
+                ('GET','/api/system'):lambda:accounts.system_overview(user,query.get('audit',['*'])[0]),
                 ('POST','/api/system'):lambda:accounts.system_action(user,data,ip),
                 ('GET','/api/tenant'):lambda:accounts.tenant_overview(user),
                 ('POST','/api/tenant'):lambda:accounts.tenant_action(user,data,ip)}
@@ -59,14 +79,14 @@ class Handler(BaseHTTPRequestHandler):
         if not route:raise NotFound()
         return route()
     def respond(self,method,data=None):
-        path=urlsplit(self.path).path
-        try:return self.json(200,self.handle_api(method,path,data or {}))
+        url=urlsplit(self.path)
+        try:return self.json(200,self.handle_api(method,url.path,data or {},parse_qs(url.query)))
         except AuthError as error:self.json(401,{'error':str(error)})
         except AccessError as error:self.json(403,{'error':str(error)})
         except LimitError as error:self.json(429,{'error':str(error)})
         except NotFound:self.json(404,{'error':'対象がありません'})
         except DomainError as error:self.json(409,{'error':str(error)})
-        except (RecognitionError,SsoError) as error:self.json(422,{'error':str(error)})
+        except (RecognitionError,SsoError,SecretError) as error:self.json(422,{'error':str(error)})
         except (ValueError,TypeError,KeyError):self.json(400,{'error':'入力形式が不正です'})
         except Exception:self.json(500,{'error':'サーバーで処理できませんでした。後で再試行してください'})
     def do_GET(self):
@@ -77,8 +97,7 @@ class Handler(BaseHTTPRequestHandler):
             query=parse_qs(url.query)
             try:
                 if query.get('error'):raise AuthError('IDプロバイダーでログインが取り消されました')
-                code=self.server.application.accounts.finish_sso(query.get('state',[''])[0],query.get('code',[''])[0],self.ip())
-                return self.redirect('/#sso='+quote(code))
+                return self.redirect(self.server.application.accounts.finish_sso(query.get('state',[''])[0],query.get('code',[''])[0],self.ip()))
             except (AuthError,SsoError,DomainError) as error:return self.redirect('/#sso_error='+quote(str(error)))
             except Exception:return self.redirect('/#sso_error='+quote('SSOでログインできませんでした'))
         if path.startswith('/api/'):return self.respond('GET')
