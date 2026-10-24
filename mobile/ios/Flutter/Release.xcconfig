@@ -1,0 +1,4 @@
+#include "Generated.xcconfig"
+// Optional signing settings for Release and Profile builds (team, profile, certificate).
+// CI writes this file from GitHub secrets; on a Mac you may create it yourself. It is not committed.
+#include? "Signing.xcconfig"

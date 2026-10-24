@@ -1,71 +1,118 @@
-import hmac
 import json
 import os
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, parse_qs, quote
 from .domain import DomainError
 from .repository import SQLiteRepository
-from .recognition import GeminiRecognizer, RecognitionError
+from .recognition import RecognitionError
+from .sso import SsoError
+from .accounts import AccountService, AccessError, AuthError, LimitError, parse_env_users
+from .crypto import SecretError, load_box
 
 WEB=Path(__file__).resolve().parent.parent/'web'
+STATIC={'/':'index.html','/index.html':'index.html','/app.js':'app.js','/admin.js':'admin.js','/domain.js':'domain.js','/migration.js':'migration.js','/repositories.js':'repositories.js',
+        '/styles.css':'styles.css','/manifest.webmanifest':'manifest.webmanifest','/sw.js':'sw.js','/icon.svg':'icon.svg'}
+MIME={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.webmanifest':'application/manifest+json','.svg':'image/svg+xml'}
+
+class NotFound(Exception):
+    pass
 
 class Application:
     def __init__(self):
-        self.repository=SQLiteRepository(os.environ.get('DATABASE_PATH','data/bacchus.sqlite3'))
-        self.users=json.loads(os.environ.get('BACCHUS_USERS') or '{}')
-        # tokens map to display names; no implicit unauthenticated shared access.
-        if not isinstance(self.users,dict) or any(not isinstance(k,str) or len(k)<24 or not isinstance(v,str) or not v for k,v in self.users.items()):
-            raise ValueError('BACCHUS_USERS requires JSON {"long-random-token": "display name"}; minimum token length 24')
-        self.recognizer=GeminiRecognizer(self.repository)
-    def user(self,header):
-        token=header.removeprefix('Bearer ')
-        return next((name for key,name in self.users.items() if hmac.compare_digest(key,token)),None)
+        path=os.environ.get('DATABASE_PATH','data/bacchus.sqlite3')
+        box,self.key_source=load_box(path)
+        self.repository=SQLiteRepository(path,box)
+        # Values stored before encryption existed, or under a rotated-out key, are re-encrypted now.
+        self.repository.rewrap_secrets()
+        self.accounts=AccountService(self.repository,parse_env_users(os.environ.get('BACCHUS_USERS') or '{}'),os.environ.get('BACCHUS_PUBLIC_URL',''),os.environ.get('BACCHUS_APP_SCHEME','bacchus'))
 
 class Handler(BaseHTTPRequestHandler):
     server_version='BACCHUS'
     def json(self,status,data):
         payload=json.dumps(data,ensure_ascii=False).encode()
         self.send_response(status); self.send_header('Content-Type','application/json; charset=utf-8');self.send_header('Cache-Control','no-store');self.send_header('X-Content-Type-Options','nosniff');self.send_header('Content-Length',str(len(payload)));self.end_headers();self.wfile.write(payload)
+    def redirect(self,location):
+        self.send_response(302);self.send_header('Location',location);self.send_header('Cache-Control','no-store');self.send_header('Referrer-Policy','no-referrer');self.send_header('Content-Length','0');self.end_headers()
+    def ip(self):
+        # Behind a reverse proxy the client address is the proxy's; trust its header only when told to.
+        forwarded=self.headers.get('X-Forwarded-For','') if os.environ.get('BACCHUS_TRUST_PROXY')=='1' else ''
+        return (forwarded.split(',')[0].strip() or self.client_address[0])[:64]
+    def agent(self):
+        return self.headers.get('User-Agent','')
+    def handle_api(self,method,path,data,query):
+        accounts=self.server.application.accounts;ip=self.ip()
+        public={'/api/auth/login':lambda:accounts.login(data.get('email'),data.get('password'),ip,self.agent()),
+                '/api/auth/mfa/verify':lambda:accounts.verify_mfa(data.get('challenge'),data.get('code'),ip,self.agent()),
+                '/api/auth/sso/start':lambda:accounts.start_sso(data.get('email'),ip,data.get('client','web')),
+                '/api/auth/exchange':lambda:accounts.exchange_code(data.get('code'),ip,self.agent()),
+                '/api/auth/device-login':lambda:accounts.device_login(data.get('deviceId'),data.get('deviceToken'),ip,self.agent())}
+        if method=='POST' and path in public:return public[path]()
+        user=accounts.authenticate(self.headers.get('Authorization',''))
+        if not user:raise AuthError('ログインしてください（セッションの有効期限が切れた可能性があります）')
+        if path=='/api/session':return {**accounts.session_info(user),'aiConfigured':user['tenantId'] is not None and accounts.ai_status(user)['configured']}
+        if method=='POST' and path=='/api/auth/logout':accounts.logout(user,ip);return {}
+        if method=='POST' and path=='/api/auth/password':accounts.change_password(user,data.get('currentPassword'),data.get('newPassword'),ip);return {}
+        # Setting up MFA is what a restricted session is for, so these come before require_ready.
+        enrollment={('GET','/api/auth/mfa'):lambda:accounts.mfa_status(user),
+                    ('POST','/api/auth/mfa/setup'):lambda:accounts.mfa_setup(user,ip),
+                    ('POST','/api/auth/mfa/enable'):lambda:accounts.mfa_enable(user,data.get('code'),ip)}
+        if (method,path) in enrollment:
+            if user.get('mustChangePassword') and user.get('method')=='password':raise AccessError('先にパスワードを変更してください')
+            return enrollment[(method,path)]()
+        accounts.require_ready(user)
+        routes={('GET','/api/state'):lambda:self.server.application.repository.read(accounts.tenant_of(user)),
+                ('POST','/api/commands'):lambda:accounts.execute(user,data,ip),
+                ('POST','/api/recognize'):lambda:accounts.recognize(user,data.get('photo'),ip),
+                ('GET','/api/ai-settings'):lambda:accounts.ai_status(user),
+                ('POST','/api/ai-settings'):lambda:accounts.configure_ai(user,data,ip),
+                ('POST','/api/auth/mfa/disable'):lambda:accounts.mfa_disable(user,data.get('code'),ip) or {},
+                ('POST','/api/auth/mfa/recovery-codes'):lambda:accounts.regenerate_recovery_codes(user,data.get('code'),ip),
+                ('GET','/api/auth/devices'):lambda:accounts.list_devices(user),
+                ('POST','/api/auth/devices'):lambda:accounts.register_device(user,data.get('name'),data.get('platform'),ip),
+                ('POST','/api/auth/devices/revoke'):lambda:accounts.revoke_device(user,data.get('deviceId'),ip) or {},
+                ('GET','/api/system'):lambda:accounts.system_overview(user,query.get('audit',['*'])[0]),
+                ('POST','/api/system'):lambda:accounts.system_action(user,data,ip),
+                ('GET','/api/tenant'):lambda:accounts.tenant_overview(user),
+                ('POST','/api/tenant'):lambda:accounts.tenant_action(user,data,ip)}
+        route=routes.get((method,path))
+        if not route:raise NotFound()
+        return route()
+    def respond(self,method,data=None):
+        url=urlsplit(self.path)
+        try:return self.json(200,self.handle_api(method,url.path,data or {},parse_qs(url.query)))
+        except AuthError as error:self.json(401,{'error':str(error)})
+        except AccessError as error:self.json(403,{'error':str(error)})
+        except LimitError as error:self.json(429,{'error':str(error)})
+        except NotFound:self.json(404,{'error':'対象がありません'})
+        except DomainError as error:self.json(409,{'error':str(error)})
+        except (RecognitionError,SsoError,SecretError) as error:self.json(422,{'error':str(error)})
+        except (ValueError,TypeError,KeyError):self.json(400,{'error':'入力形式が不正です'})
+        except Exception:self.json(500,{'error':'サーバーで処理できませんでした。後で再試行してください'})
     def do_GET(self):
-        path=urlsplit(self.path).path
-        if path=='/api/health': return self.json(200,{'ok':True})
-        if path.startswith('/api/'):
-            user=self.server.application.user(self.headers.get('Authorization',''))
-            if not user:return self.json(401,{'error':'接続トークンが無効です'})
-            if path=='/api/session':return self.json(200,{'user':user,'workspace':self.server.application.repository.workspace(),'aiConfigured':self.server.application.recognizer.status()['configured']})
-            if path=='/api/ai-settings':return self.json(200,self.server.application.recognizer.status())
-            if path=='/api/state':return self.json(200,self.server.application.repository.read())
-            return self.json(404,{'error':'対象がありません'})
+        url=urlsplit(self.path);path=url.path
+        if path=='/api/health':return self.json(200,{'ok':True})
+        if path=='/api/auth/sso/callback':
+            # The identity provider returns here; the page receives only a short-lived one-time code.
+            query=parse_qs(url.query)
+            try:
+                if query.get('error'):raise AuthError('IDプロバイダーでログインが取り消されました')
+                return self.redirect(self.server.application.accounts.finish_sso(query.get('state',[''])[0],query.get('code',[''])[0],self.ip()))
+            except (AuthError,SsoError,DomainError) as error:return self.redirect('/#sso_error='+quote(str(error)))
+            except Exception:return self.redirect('/#sso_error='+quote('SSOでログインできませんでした'))
+        if path.startswith('/api/'):return self.respond('GET')
         # Explicit static whitelist: server files, credentials and DB are never served.
-        names={'/':'index.html','/index.html':'index.html','/app.js':'app.js','/domain.js':'domain.js','/migration.js':'migration.js','/repositories.js':'repositories.js','/styles.css':'styles.css','/manifest.webmanifest':'manifest.webmanifest','/sw.js':'sw.js','/icon.svg':'icon.svg'}
-        if path not in names:return self.json(404,{'error':'対象がありません'})
-        file=WEB/names[path]
-        mime={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.webmanifest':'application/manifest+json','.svg':'image/svg+xml'}[file.suffix]
-        data=file.read_bytes();self.send_response(200);self.send_header('Content-Type',mime);self.send_header('Content-Length',str(len(data)));self.send_header('Cache-Control','no-cache');self.send_header('X-Content-Type-Options','nosniff');self.send_header('Referrer-Policy','no-referrer');self.send_header('Content-Security-Policy',"default-src 'self'; img-src 'self' data: blob:; style-src 'self'; script-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'");self.end_headers();self.wfile.write(data)
+        if path not in STATIC:return self.json(404,{'error':'対象がありません'})
+        file=WEB/STATIC[path]
+        data=file.read_bytes();self.send_response(200);self.send_header('Content-Type',MIME[file.suffix]);self.send_header('Content-Length',str(len(data)));self.send_header('Cache-Control','no-cache');self.send_header('X-Content-Type-Options','nosniff');self.send_header('Referrer-Policy','no-referrer');self.send_header('Content-Security-Policy',"default-src 'self'; img-src 'self' data: blob:; style-src 'self'; script-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'");self.end_headers();self.wfile.write(data)
     def do_POST(self):
-        user=self.server.application.user(self.headers.get('Authorization',''))
-        if not user:return self.json(401,{'error':'接続トークンが無効です'})
         try:
             length=int(self.headers.get('Content-Length','0'))
             if length<=0 or length>25000000:return self.json(413,{'error':'送信データが大きすぎます'})
             data=json.loads(self.rfile.read(length))
-            if not isinstance(data,dict):raise DomainError('リクエストが不正です')
-            path=urlsplit(self.path).path
-            if path=='/api/commands':
-                data['actor']=user
-                return self.json(200,self.server.application.repository.execute(data))
-            if path=='/api/ai-settings':
-                recognizer=self.server.application.recognizer
-                if data.get('clear') is True:return self.json(200,recognizer.clear())
-                return self.json(200,recognizer.configure(data.get('apiKey') or None,data.get('model','auto')))
-            if path=='/api/recognize':return self.json(200,self.server.application.recognizer.recognize(data.get('photo')))
-            return self.json(404,{'error':'対象がありません'})
-        except DomainError as error:self.json(409,{'error':str(error)})
-        except RecognitionError as error:self.json(422,{'error':str(error)})
-        except (ValueError,TypeError,KeyError):self.json(400,{'error':'入力形式が不正です'})
-        except Exception:
-            self.json(500,{'error':'サーバーで保存できませんでした。後で再試行してください'})
+            if not isinstance(data,dict):raise ValueError()
+        except ValueError:return self.json(400,{'error':'入力形式が不正です'})
+        self.respond('POST',data)
     def log_message(self,format,*args):
         # Do not log URL query strings, credentials or image request bodies.
         pass
@@ -74,5 +121,7 @@ def create_server(host='127.0.0.1',port=8000):
     server=ThreadingHTTPServer((host,port),Handler);server.application=Application();return server
 if __name__=='__main__':
     server=create_server(os.environ.get('HOST','127.0.0.1'),int(os.environ.get('PORT','8000')))
+    if not server.application.accounts.has_system_admin():
+        print('注意: 全体管理者がいません。BACCHUS_USERSに {"トークン":{"name":"運営","role":"system_admin"}} を追加してください（テナントの作成に必要）',flush=True)
     print(f'BACCHUS-SYSTEM: http://{server.server_address[0]}:{server.server_address[1]}',flush=True)
     server.serve_forever()

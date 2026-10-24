@@ -47,6 +47,23 @@ class InventoryService:
                 raise DomainError('冷蔵庫名またはIDが不正です')
             s['refrigerators'].append(dict(id=fid, name=name))
             e['name'] = name
+        elif kind in ('renameFridge', 'deleteFridge'):
+            f = next((f for f in s['refrigerators'] if f['id'] == p.get('id')), None)
+            if f is None:
+                raise DomainError('対象の冷蔵庫が見つかりません')
+            e['fridgeId'] = f['id']
+            if kind == 'renameFridge':
+                name = string(p.get('name', ''), 80)
+                if not name:
+                    raise DomainError('冷蔵庫名を入力してください')
+                e['name'] = f'{f["name"]} → {name}'
+                f['name'] = name
+            else:
+                # Empty bottles keep their history; only bottles still holding sake block removal.
+                if any(b['fridgeId'] == f['id'] and b['remaining'] > 0 for b in s['bottles']):
+                    raise DomainError('在庫が残っている冷蔵庫は削除できません。先に移動してください')
+                s['refrigerators'].remove(f)
+                e['name'] = f['name']
         elif kind == 'receive':
             name = string(p.get('name', ''))
             if not name:

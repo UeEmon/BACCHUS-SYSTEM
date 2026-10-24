@@ -1,0 +1,125 @@
+name: Mobile app
+
+on:
+  push:
+    paths: ['mobile/**', 'server/**', '.github/workflows/mobile.yml']
+  pull_request:
+    paths: ['mobile/**', 'server/**', '.github/workflows/mobile.yml']
+  workflow_dispatch:
+
+env:
+  FLUTTER_VERSION: '3.47.8'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+      - run: flutter pub get
+      - run: flutter analyze
+      - run: flutter test
+      # The app against the real Python server.
+      - run: flutter test test/server_contract_test.dart
+        env:
+          BACCHUS_SERVER_TESTS: '1'
+
+  # Signed builds when the signing secrets are set (docs/BUILD_SETUP.md, section 5);
+  # otherwise test builds. Store builds take the run number as their build number,
+  # so each upload is higher than the last.
+  android:
+    needs: test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mobile
+    env:
+      KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+      - name: Release signing key
+        if: env.KEYSTORE_BASE64 != ''
+        env:
+          STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          echo "$KEYSTORE_BASE64" | base64 --decode > android/app/upload-keystore.jks
+          printf 'storeFile=upload-keystore.jks\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' "$STORE_PASSWORD" "$KEY_ALIAS" "$KEY_PASSWORD" > android/key.properties
+      - run: flutter build apk --release --build-number=${{ github.run_number }}
+      - run: flutter build appbundle --release --build-number=${{ github.run_number }}
+      - name: Check the signature
+        run: |
+          keytool -printcert -jarfile build/app/outputs/bundle/release/app-release.aab > signature.txt
+          grep -m1 "Owner:" signature.txt
+          if [ -n "$KEYSTORE_BASE64" ] && grep -q "CN=Android Debug" signature.txt; then
+            echo "::error::署名用シークレットがあるのにデバッグ署名になっています"; exit 1
+          fi
+      - name: Remove the signing key
+        if: always()
+        run: rm -f android/app/upload-keystore.jks android/key.properties
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.KEYSTORE_BASE64 != '' && 'android-signed' || 'android-test' }}
+          path: |
+            mobile/build/app/outputs/flutter-apk/app-release.apk
+            mobile/build/app/outputs/bundle/release/app-release.aab
+
+  ios:
+    needs: test
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: mobile
+    env:
+      IOS_DIST_CERT_P12_BASE64: ${{ secrets.IOS_DIST_CERT_P12_BASE64 }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+      - name: Signing certificate and provisioning profile
+        if: env.IOS_DIST_CERT_P12_BASE64 != ''
+        env:
+          IOS_DIST_CERT_PASSWORD: ${{ secrets.IOS_DIST_CERT_PASSWORD }}
+          IOS_PROVISION_PROFILE_BASE64: ${{ secrets.IOS_PROVISION_PROFILE_BASE64 }}
+        run: bash ci/ios_signing.sh
+      - name: Signed IPA for App Store Connect
+        if: env.IOS_DIST_CERT_P12_BASE64 != ''
+        run: flutter build ipa --release --build-number=${{ github.run_number }} --export-options-plist="$RUNNER_TEMP/ExportOptions.plist"
+      # Without the secrets: proves the project compiles.
+      - name: Unsigned build
+        if: env.IOS_DIST_CERT_P12_BASE64 == ''
+        run: |
+          flutter build ios --release --no-codesign
+          cd build/ios/iphoneos && zip -qr Runner-unsigned.zip Runner.app
+      - name: Remove the keychain and profile
+        if: always()
+        run: |
+          if [ -n "${KEYCHAIN_PATH:-}" ]; then security delete-keychain "$KEYCHAIN_PATH" || true; fi
+          rm -f ios/Flutter/Signing.xcconfig "$RUNNER_TEMP"/*.mobileprovision "$RUNNER_TEMP"/ExportOptions.plist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.IOS_DIST_CERT_P12_BASE64 != '' && 'ios-signed' || 'ios-unsigned' }}
+          path: |
+            mobile/build/ios/ipa/*.ipa
+            mobile/build/ios/iphoneos/Runner-unsigned.zip
+          if-no-files-found: error
