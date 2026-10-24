@@ -64,7 +64,7 @@ class WebSettingsTests(unittest.TestCase):
         self.assertEqual(status['model'],'gemini-3.5-flash');self.assertTrue(status['auto']);self.assertEqual(status['source'],'web')
         self.assertEqual(status['keyHint'],'…cdef');self.assertNotIn(self.key,json.dumps(status))
         self.assertIn('pageToken=p2',network.call_args_list[1].args[0].full_url);self.assertNotIn(self.key,network.call_args_list[0].args[0].full_url)
-        self.assertNotIn(self.key,json.dumps(self.repo.read()))
+        self.assertNotIn(self.key,json.dumps(self.repo.read(self.repo.create_tenant('T')['id'])))
     def test_manual_model_and_keep_key(self):
         with patch('urllib.request.urlopen',return_value=listing('gemini-3.5-flash','gemini-3.5-pro')):self.ai.configure(self.key)
         with patch('urllib.request.urlopen',return_value=listing('gemini-3.5-flash','gemini-3.5-pro')):status=self.ai.configure(None,'gemini-3.5-pro')
@@ -126,7 +126,7 @@ class ProviderTests(unittest.TestCase):
         # Users unhappy with the automatic model switch to a larger one.
         with patch('urllib.request.urlopen',return_value=claude_listing('claude-opus-5-5','claude-haiku-5-5')):status=self.ai.configure(None,'claude-opus-5-5','claude')
         self.assertEqual((status['model'],status['auto']),('claude-opus-5-5',False))
-        self.assertNotIn(key,json.dumps(status));self.assertNotIn(key,json.dumps(self.repo.read()))
+        self.assertNotIn(key,json.dumps(status));self.assertNotIn(key,json.dumps(self.repo.read(self.repo.create_tenant('T')['id'])))
         answer={'stop_reason':'end_turn','content':[{'type':'thinking','thinking':''},{'type':'text','text':json.dumps({'name':'試験酒','volume':720})}]}
         with patch('urllib.request.urlopen',return_value=io.BytesIO(json.dumps(answer).encode())) as network:
             result=self.ai.recognize(self.photo)

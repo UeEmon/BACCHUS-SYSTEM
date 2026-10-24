@@ -1,4 +1,3 @@
-import hmac
 import json
 import os
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
@@ -7,32 +6,17 @@ from urllib.parse import urlsplit
 from .domain import DomainError
 from .repository import SQLiteRepository
 from .recognition import LabelRecognizer, RecognitionError
+from .accounts import AccountService, AccessError, parse_env_users
 
 WEB=Path(__file__).resolve().parent.parent/'web'
 
 class Application:
     def __init__(self):
         self.repository=SQLiteRepository(os.environ.get('DATABASE_PATH','data/bacchus.sqlite3'))
-        self.users=parse_users(os.environ.get('BACCHUS_USERS') or '{}')
+        self.accounts=AccountService(self.repository,parse_env_users(os.environ.get('BACCHUS_USERS') or '{}'))
         self.recognizer=LabelRecognizer(self.repository)
     def user(self,header):
-        """{'name','role'} of the token's holder, or None."""
-        token=header.removeprefix('Bearer ')
-        return next((user for key,user in self.users.items() if hmac.compare_digest(key,token)),None)
-
-ROLES=('admin','member')
-def parse_users(text):
-    """Tokens map to a display name (an administrator, as before roles existed) or to
-    {"name": ..., "role": "admin"|"member"}; no implicit unauthenticated shared access."""
-    users=json.loads(text)
-    error=ValueError('BACCHUS_USERS requires JSON {"long-random-token": "display name" or {"name": "display name", "role": "admin" or "member"}}; minimum token length 24')
-    if not isinstance(users,dict):raise error
-    parsed={}
-    for key,value in users.items():
-        if isinstance(value,str):value={'name':value,'role':'admin'}
-        if not isinstance(key,str) or len(key)<24 or not isinstance(value,dict) or set(value)-{'name','role'} or not isinstance(value.get('name'),str) or not value['name'] or value.get('role','member') not in ROLES:raise error
-        parsed[key]={'name':value['name'],'role':value.get('role','member')}
-    return parsed
+        return self.accounts.authenticate(header)
 
 class Handler(BaseHTTPRequestHandler):
     server_version='BACCHUS'
@@ -45,9 +29,13 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith('/api/'):
             user=self.server.application.user(self.headers.get('Authorization',''))
             if not user:return self.json(401,{'error':'接続トークンが無効です'})
-            if path=='/api/session':return self.json(200,{'user':user['name'],'role':user['role'],'workspace':self.server.application.repository.workspace(),'aiConfigured':self.server.application.recognizer.status()['configured']})
-            if path=='/api/ai-settings':return self.json(200,self.server.application.recognizer.status())
-            if path=='/api/state':return self.json(200,self.server.application.repository.read())
+            app=self.server.application
+            try:
+                if path=='/api/session':return self.json(200,{**app.accounts.session(user),'aiConfigured':app.recognizer.status()['configured']})
+                if path=='/api/ai-settings':return self.json(200,app.recognizer.status())
+                if path=='/api/state':return self.json(200,app.repository.read(app.accounts.tenant_of(user)))
+                if path=='/api/admin':return self.json(200,app.accounts.overview(user))
+            except AccessError as error:return self.json(403,{'error':str(error)})
             return self.json(404,{'error':'対象がありません'})
         # Explicit static whitelist: server files, credentials and DB are never served.
         names={'/':'index.html','/index.html':'index.html','/app.js':'app.js','/domain.js':'domain.js','/migration.js':'migration.js','/repositories.js':'repositories.js','/styles.css':'styles.css','/manifest.webmanifest':'manifest.webmanifest','/sw.js':'sw.js','/icon.svg':'icon.svg'}
@@ -64,17 +52,21 @@ class Handler(BaseHTTPRequestHandler):
             data=json.loads(self.rfile.read(length))
             if not isinstance(data,dict):raise DomainError('リクエストが不正です')
             path=urlsplit(self.path).path
+            app=self.server.application
             if path=='/api/commands':
+                tenant=app.accounts.tenant_of(user);app.accounts.check_command(user,data)
                 data['actor']=user['name']
-                return self.json(200,self.server.application.repository.execute(data))
+                return self.json(200,app.repository.execute(tenant,data))
+            if path=='/api/admin':return self.json(200,app.accounts.act(user,data))
             if path=='/api/ai-settings':
-                if user['role']!='admin':return self.json(403,{'error':'AI設定の変更は管理者のみ可能です'})
+                app.accounts.require_system_admin(user,'AI設定の変更は全体管理者のみ可能です')
                 recognizer=self.server.application.recognizer
                 provider=data.get('provider') or None
                 if data.get('clear') is True:return self.json(200,recognizer.clear(provider))
                 return self.json(200,recognizer.configure(data.get('apiKey') or None,data.get('model','auto'),provider))
             if path=='/api/recognize':return self.json(200,self.server.application.recognizer.recognize(data.get('photo')))
             return self.json(404,{'error':'対象がありません'})
+        except AccessError as error:self.json(403,{'error':str(error)})
         except DomainError as error:self.json(409,{'error':str(error)})
         except RecognitionError as error:self.json(422,{'error':str(error)})
         except (ValueError,TypeError,KeyError):self.json(400,{'error':'入力形式が不正です'})
@@ -88,5 +80,7 @@ def create_server(host='127.0.0.1',port=8000):
     server=ThreadingHTTPServer((host,port),Handler);server.application=Application();return server
 if __name__=='__main__':
     server=create_server(os.environ.get('HOST','127.0.0.1'),int(os.environ.get('PORT','8000')))
+    if not server.application.accounts.has_system_admin():
+        print('注意: 全体管理者がいません。BACCHUS_USERSに {"トークン":{"name":"運営","role":"system_admin"}} を追加してください（テナント作成・AI設定に必要）',flush=True)
     print(f'BACCHUS-SYSTEM: http://{server.server_address[0]}:{server.server_address[1]}',flush=True)
     server.serve_forever()

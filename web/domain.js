@@ -31,6 +31,11 @@ export class InventoryService {
       const name=text(p.name,80); if(!name) fail('冷蔵庫名を入力してください');
       if(s.refrigerators.some(f=>f.id===p.id)) fail('冷蔵庫IDが重複しています');
       s.refrigerators.push({id:p.id, name}); event.name=name;
+    } else if(type==='renameFridge'||type==='deleteFridge') {
+      const f=s.refrigerators.find(f=>f.id===p.id); if(!f) fail('対象の冷蔵庫が見つかりません');
+      event.fridgeId=f.id;
+      if(type==='renameFridge') { const name=text(p.name,80); if(!name) fail('冷蔵庫名を入力してください'); event.name=`${f.name} → ${name}`; f.name=name; }
+      else { if(s.bottles.some(b=>b.fridgeId===f.id&&b.remaining>0)) fail('在庫が残っている冷蔵庫は削除できません。先に移動してください'); s.refrigerators=s.refrigerators.filter(x=>x!==f); event.name=f.name; }
     } else if(type==='receive') {
       const name=text(p.name); if(!name) fail('銘柄を入力してください');
       const volume=integer(p.volume,1,10000), count=integer(p.count,1,100);
