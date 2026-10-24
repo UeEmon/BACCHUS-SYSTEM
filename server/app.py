@@ -6,7 +6,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 from .domain import DomainError
 from .repository import SQLiteRepository
-from .recognition import GeminiRecognizer, RecognitionError
+from .recognition import LabelRecognizer, RecognitionError
 
 WEB=Path(__file__).resolve().parent.parent/'web'
 
@@ -17,7 +17,7 @@ class Application:
         # tokens map to display names; no implicit unauthenticated shared access.
         if not isinstance(self.users,dict) or any(not isinstance(k,str) or len(k)<24 or not isinstance(v,str) or not v for k,v in self.users.items()):
             raise ValueError('BACCHUS_USERS requires JSON {"long-random-token": "display name"}; minimum token length 24')
-        self.recognizer=GeminiRecognizer(self.repository)
+        self.recognizer=LabelRecognizer(self.repository)
     def user(self,header):
         token=header.removeprefix('Bearer ')
         return next((name for key,name in self.users.items() if hmac.compare_digest(key,token)),None)
@@ -57,8 +57,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json(200,self.server.application.repository.execute(data))
             if path=='/api/ai-settings':
                 recognizer=self.server.application.recognizer
-                if data.get('clear') is True:return self.json(200,recognizer.clear())
-                return self.json(200,recognizer.configure(data.get('apiKey') or None,data.get('model','auto')))
+                provider=data.get('provider') or None
+                if data.get('clear') is True:return self.json(200,recognizer.clear(provider))
+                return self.json(200,recognizer.configure(data.get('apiKey') or None,data.get('model','auto'),provider))
             if path=='/api/recognize':return self.json(200,self.server.application.recognizer.recognize(data.get('photo')))
             return self.json(404,{'error':'対象がありません'})
         except DomainError as error:self.json(409,{'error':str(error)})

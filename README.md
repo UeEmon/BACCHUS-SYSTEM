@@ -1,11 +1,11 @@
 # BACCHUS-SYSTEM
 
-日本酒のラベル写真・保管場所・残量を管理するモバイル向けPWA。iPhone/Androidのブラウザから使えます。バージョン 0.2.0。
+日本酒のラベル写真・保管場所・残量を管理するモバイル向けPWA。iPhone/Androidのブラウザから使えます。バージョン 0.3.0。
 
 ## 実装した機能
 
 - 写真撮影・端末内で縮小、銘柄・酒蔵・容量・製造年月等を確認して登録
-- Geminiによるラベル読み取り（サーバーのAPIキー・モデル設定が必要）
+- Gemini・Claude・OpenAIから選べるAIラベル読み取り（サーバーのAPIキー・モデル設定が必要）
 - 複数冷蔵庫と自由入力の棚・区画、瓶単位の移動
 - 300mlは1本消費、その他は1合＝180ml消費。端数は「残りを飲み切る」
 - 開封日、残量、入荷・消費・移動履歴、後続変更がない操作の取消
@@ -63,19 +63,35 @@ python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
 BACCHUS_USERS='{"ここを24文字以上のランダムなトークンに置換":"利用者名"}'
 GEMINI_API_KEY=Googleで発行したAPIキー（画面から設定する場合は不要）
 GEMINI_MODEL=アカウントで利用可能な画像入力対応モデル名
+# ClaudeやOpenAIを環境変数で使う場合（任意）
+AI_PROVIDER=claude
+ANTHROPIC_API_KEY=Claude Consoleで発行したAPIキー
+ANTHROPIC_MODEL=claude-opus-5-5
+OPENAI_API_KEY=OpenAI Platformで発行したAPIキー
+OPENAI_MODEL=gpt-5.5-mini
 ```
+
+`AI_PROVIDER`は`gemini`（既定）・`claude`・`openai`のいずれかです。
 
 `docker compose up -d`で設定を反映し、アプリの「設定」でトークンと保存先を指定します。
 
-### GeminiのAPIキーを画面から設定する
+### AIサービスとAPIキーを画面から設定する
 
-接続トークンを設定したあと、「設定」→「AIラベル読み取り（Gemini）」にGoogle AI StudioのAPIキーを入力して保存します。保存時にサーバーがそのキーで使えるモデルの一覧を取得し、モデルが「自動（推奨）」なら最新の安定版Flash（なければプレビュー版のFlash、次にPro）を選びます。ラベル読み取りには速く安価なFlashで十分なためです。一覧から特定のモデルを選ぶこともできます。自動選択中に使用中のモデルが提供終了（HTTP 404）になった場合は、その時点の最適なモデルを選び直して1回だけ再試行します。
+接続トークンを設定したあと、「設定」→「AIラベル読み取り」でAIサービス（Google Gemini・Anthropic Claude・OpenAI）を選び、APIキーを入力して保存します。最後に保存したサービスがラベル読み取りに使われます。キーはサービスごとに別々に保存するため、切り替えのたびに入力し直す必要はありません（キー欄を空のまま保存すると保存済みのキーを使います）。環境変数だけで設定したサービスも、キー欄を空のまま保存すると切り替えられます。
 
-キーはサーバーのSQLiteの設定領域に保存し、在庫データ（`/api/state`）やJSONバックアップには含めません。画面には末尾4文字だけを表示します。DBファイルのバックアップにはキーが含まれるため、非公開の場所に保管してください。画面で設定したキーは環境変数`GEMINI_API_KEY`・`GEMINI_MODEL`より優先し、画面で削除すると環境変数の設定に戻ります。共用の接続トークンを持つ利用者は全員がAI設定を変更できます。トークンはsessionStorageに保存し、サーバーAPIキーは端末に配布しません。共用利用者は全員が同じ在庫を編集する権限を持ちます。冷蔵庫単位の権限・管理者画面は未実装です。
+**Gemini**: 保存時にサーバーがそのキーで使えるモデルの一覧を取得し、モデルが「自動（推奨）」なら最新の安定版Flash（なければプレビュー版のFlash、次にPro）を選びます。ラベル読み取りには速く安価なFlashで十分なためです。
 
-AI解析はユーザーが「AIでラベルを読み取る」を押したときだけ写真をサーバー経由でGoogleへ送信します。個人用保存でもAI利用時には画像が送信されます。個人用の在庫DB全体を送ることはありません。APIの認証・課金・利用上限はチャットサービスの契約とは別です。
+**Claude**: Claude ConsoleのAPIキーを使います。自動選択は画像入力と構造化出力（JSONの形式保証）に対応したモデルのうち最新のOpus（なければSonnet、次にHaiku）です。4.5世代より前のモデルは対象外です。料金を抑えたい場合は一覧からSonnetやHaikuを選べます。対応モデルでは読み取りの思考量を`low`に抑え、安全上の理由で断られた場合はサーバー側の代替モデル（`fallbacks`）で再試行し、それでも断られた場合は手入力を案内します。
 
-APIリファレンス: https://ai.google.dev/api/generate-content
+**OpenAI**: OpenAI PlatformのAPIキーを使います。自動選択はGPT-4.1以降の最新のmini（なければ通常版、次にnano）です。
+
+どのサービスでも一覧から特定のモデルを選べます。自動選択中に使用中のモデルが提供終了（HTTP 404）になった場合は、その時点の最適なモデルを選び直して1回だけ再試行します。
+
+キーはサーバーのSQLiteの設定領域に保存し、在庫データ（`/api/state`）やJSONバックアップには含めません。画面には末尾4文字だけを表示します。DBファイルのバックアップにはキーが含まれるため、非公開の場所に保管してください。画面で設定したキーは同じサービスの環境変数（`GEMINI_API_KEY`・`ANTHROPIC_API_KEY`・`OPENAI_API_KEY`とモデル名）より優先し、画面で削除すると環境変数の設定に戻ります。共用の接続トークンを持つ利用者は全員がAI設定を変更できます。トークンはsessionStorageに保存し、サーバーAPIキーは端末に配布しません。共用利用者は全員が同じ在庫を編集する権限を持ちます。冷蔵庫単位の権限・管理者画面は未実装です。
+
+AI解析はユーザーが「AIでラベルを読み取る」を押したときだけ、写真をサーバー経由で設定中のサービス（Google・Anthropic・OpenAIのいずれか）へ送信します。個人用保存でもAI利用時には画像が送信されます。個人用の在庫DB全体を送ることはありません。APIの認証・課金・利用上限はチャットサービスの契約とは別です。
+
+APIリファレンス: https://ai.google.dev/api/generate-content ・ https://platform.claude.com/docs/en/api/messages ・ https://platform.openai.com/docs/api-reference/chat
 
 ### 同期・競合
 
@@ -91,10 +107,10 @@ APIリファレンス: https://ai.google.dev/api/generate-content
 | ドメイン | `web/domain.js`, `server/domain.py` | 容量・消費ルール・変更検証 |
 | 端末/共用保存 | `web/repositories.js` | IndexedDB、API、保留操作 |
 | サーバー保存 | `server/repository.py` | SQLiteトランザクション |
-| AIアダプター | `server/recognition.py` | Geminiへの画像送信・結果検証 |
+| AIアダプター | `server/recognition.py` | Gemini・Claude・OpenAIへの画像送信・モデル選択・結果検証 |
 | HTTP | `server/app.py` | 認証、静的配信、API |
 
-`InventoryService`, `Bottle`, `ConsumptionPolicy`, `LocalRepository`, `ServerRepository`, `RecognitionService`, `GeminiRecognizer`の責任を分離しています。表示に必要な値は容量mlを整数として保持し、数量と残量を混同しません。商品ごとに瓶の個体IDを発行するため、同銘柄の開封済み瓶・別の冷蔵庫の瓶も区別できます。
+`InventoryService`, `Bottle`, `ConsumptionPolicy`, `LocalRepository`, `ServerRepository`, `RecognitionService`, `LabelRecognizer`（サービスごとの`Gemini`・`Claude`・`OpenAI`）の責任を分離しています。表示に必要な値は容量mlを整数として保持し、数量と残量を混同しません。商品ごとに瓶の個体IDを発行するため、同銘柄の開封済み瓶・別の冷蔵庫の瓶も区別できます。
 
 初版はネイティブFlutterではなくPWAであり、端末保存はSQLiteではなくIndexedDBです。サーバーは小規模共用向けのSQLite状態ストアです。大規模利用時は商品・瓶・履歴を正規化したDBとページングへ変更してください。
 
@@ -105,19 +121,18 @@ npm test
 python3 -m unittest discover -s tests -p 'test_*.py' -v
 ```
 
-Node 20以降。30件の自動テストで、消費計算、300ml瓶、残量不足、移動、取消、復元リプレイ、再送、通信断、競合、サーバー同時更新、永続保存、認証、移行の重複防止・不正データのロールバック、AIの不正応答・タイムアウト・利用制限エラーを検証します。AI通信テストはモック応答です。
+Node 20以降。42件の自動テストで、消費計算、300ml瓶、残量不足、移動、取消、復元リプレイ、再送、通信断、競合、サーバー同時更新、永続保存、認証、移行の重複防止・不正データのロールバック、AIの不正応答・タイムアウト・利用制限エラー、サービスごとのモデル選択・キー保存・切り替え・拒否応答を検証します。AI通信テストはモック応答です。
 
-実機のカメラ・ホーム画面追加、Docker Desktop上の起動、実際のGemini応答は利用環境で確認が必要です。APIキー未提供のためAIの実画像精度は未測定です。
+実機のカメラ・ホーム画面追加、Docker Desktop上の起動、実際のGemini応答は利用環境で確認が必要です。APIキー未提供のためAIの実画像精度・実際のClaude/OpenAI応答は未測定です。
 
 ## 今後の拡張
 
 - 商品マスター照合、バーコード、端末内OCR
-- OpenAI等の追加AIプロバイダー（現時点はGeminiのみ）
 - 共用から個人へのデータ移行、冷蔵庫ごとの権限、温度センサー、通知
 - ネイティブアプリ配布とストア申請
 
 以前の「利用上限中はGeminiへ引き継ぐ」という会話を理由に、開発会話や個人データをGeminiへ自動転送する機能はありません。
 
-## 0.2.0 更新
+## 0.3.0 更新
 
-既存のDocker環境は `git pull --ff-only` → `docker compose up -d --build` で更新します。PWAを開いたままの場合、新しいオフラインキャッシュは既存のアプリタブをすべて閉じて開き直すと有効になります。在庫データは保持されます。
+AIラベル読み取りにClaudeとOpenAIを追加しました。既存のGemini設定はそのまま引き継がれます。既存のDocker環境は `git pull --ff-only` → `docker compose up -d --build` で更新します。PWAを開いたままの場合、新しいオフラインキャッシュは既存のアプリタブをすべて閉じて開き直すと有効になります。在庫データは保持されます。
