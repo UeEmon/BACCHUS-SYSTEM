@@ -1,4 +1,4 @@
-const CACHE='bacchus-shell-v4';
+const CACHE='bacchus-shell-v5';
 const FILES=['/','/index.html','/app.js','/domain.js','/migration.js','/repositories.js','/styles.css','/manifest.webmanifest','/icon.svg'];
 self.addEventListener('install',event=>event.waitUntil(caches.open(CACHE).then(cache=>cache.addAll(FILES))));
 self.addEventListener('activate',event=>event.waitUntil(caches.keys().then(keys=>Promise.all(keys.filter(k=>k.startsWith('bacchus-shell-')&&k!==CACHE).map(k=>caches.delete(k)))).then(()=>self.clients.claim())));

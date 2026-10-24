@@ -13,14 +13,26 @@ WEB=Path(__file__).resolve().parent.parent/'web'
 class Application:
     def __init__(self):
         self.repository=SQLiteRepository(os.environ.get('DATABASE_PATH','data/bacchus.sqlite3'))
-        self.users=json.loads(os.environ.get('BACCHUS_USERS') or '{}')
-        # tokens map to display names; no implicit unauthenticated shared access.
-        if not isinstance(self.users,dict) or any(not isinstance(k,str) or len(k)<24 or not isinstance(v,str) or not v for k,v in self.users.items()):
-            raise ValueError('BACCHUS_USERS requires JSON {"long-random-token": "display name"}; minimum token length 24')
+        self.users=parse_users(os.environ.get('BACCHUS_USERS') or '{}')
         self.recognizer=LabelRecognizer(self.repository)
     def user(self,header):
+        """{'name','role'} of the token's holder, or None."""
         token=header.removeprefix('Bearer ')
-        return next((name for key,name in self.users.items() if hmac.compare_digest(key,token)),None)
+        return next((user for key,user in self.users.items() if hmac.compare_digest(key,token)),None)
+
+ROLES=('admin','member')
+def parse_users(text):
+    """Tokens map to a display name (an administrator, as before roles existed) or to
+    {"name": ..., "role": "admin"|"member"}; no implicit unauthenticated shared access."""
+    users=json.loads(text)
+    error=ValueError('BACCHUS_USERS requires JSON {"long-random-token": "display name" or {"name": "display name", "role": "admin" or "member"}}; minimum token length 24')
+    if not isinstance(users,dict):raise error
+    parsed={}
+    for key,value in users.items():
+        if isinstance(value,str):value={'name':value,'role':'admin'}
+        if not isinstance(key,str) or len(key)<24 or not isinstance(value,dict) or set(value)-{'name','role'} or not isinstance(value.get('name'),str) or not value['name'] or value.get('role','member') not in ROLES:raise error
+        parsed[key]={'name':value['name'],'role':value.get('role','member')}
+    return parsed
 
 class Handler(BaseHTTPRequestHandler):
     server_version='BACCHUS'
@@ -33,7 +45,7 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith('/api/'):
             user=self.server.application.user(self.headers.get('Authorization',''))
             if not user:return self.json(401,{'error':'接続トークンが無効です'})
-            if path=='/api/session':return self.json(200,{'user':user,'workspace':self.server.application.repository.workspace(),'aiConfigured':self.server.application.recognizer.status()['configured']})
+            if path=='/api/session':return self.json(200,{'user':user['name'],'role':user['role'],'workspace':self.server.application.repository.workspace(),'aiConfigured':self.server.application.recognizer.status()['configured']})
             if path=='/api/ai-settings':return self.json(200,self.server.application.recognizer.status())
             if path=='/api/state':return self.json(200,self.server.application.repository.read())
             return self.json(404,{'error':'対象がありません'})
@@ -53,9 +65,10 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(data,dict):raise DomainError('リクエストが不正です')
             path=urlsplit(self.path).path
             if path=='/api/commands':
-                data['actor']=user
+                data['actor']=user['name']
                 return self.json(200,self.server.application.repository.execute(data))
             if path=='/api/ai-settings':
+                if user['role']!='admin':return self.json(403,{'error':'AI設定の変更は管理者のみ可能です'})
                 recognizer=self.server.application.recognizer
                 provider=data.get('provider') or None
                 if data.get('clear') is True:return self.json(200,recognizer.clear(provider))

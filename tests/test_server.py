@@ -79,4 +79,34 @@ class HttpTests(unittest.TestCase):
         self.assertTrue(call('/api/session')['aiConfigured']);self.assertNotIn(key,json.dumps(call('/api/state')))
         self.assertFalse(call('/api/ai-settings',{'clear':True})['configured'])
 
+class RoleTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory();self.admin='admin-token-longer-than-24-characters';self.member='member-token-longer-than-24-chars';self.legacy='legacy-token-longer-than-24-chars'
+        users={self.admin:{'name':'Alice','role':'admin'},self.member:{'name':'Bob'},self.legacy:'Carol'}
+        self.env=patch.dict(os.environ,{'DATABASE_PATH':self.tmp.name+'/db','BACCHUS_USERS':json.dumps(users),'GEMINI_API_KEY':'','AI_PROVIDER':''});self.env.start()
+        self.http=create_server(port=0);self.thread=threading.Thread(target=self.http.serve_forever,daemon=True);self.thread.start();self.url=f'http://127.0.0.1:{self.http.server_port}'
+    def tearDown(self):self.http.shutdown();self.http.server_close();self.env.stop();self.tmp.cleanup()
+    def call(self,path,token,body=None):
+        request=urllib.request.Request(self.url+path,data=json.dumps(body).encode() if body is not None else None,headers={'Authorization':'Bearer '+token,'Content-Type':'application/json'})
+        with urllib.request.urlopen(request) as response:return json.load(response)
+    def test_session_reports_role(self):
+        # A bare display name keeps the full rights it had before roles existed; an object without a role is a member.
+        self.assertEqual([(s['user'],s['role']) for s in map(lambda t:self.call('/api/session',t),(self.admin,self.member,self.legacy))],[('Alice','admin'),('Bob','member'),('Carol','admin')])
+    def test_member_uses_inventory_but_not_ai_settings(self):
+        state=self.call('/api/commands',self.member,dict(id='c1',type='addFridge',payload=dict(id='f',name='冷蔵庫')))
+        self.assertEqual(state['events'][0]['actor'],'Bob')
+        self.assertFalse(self.call('/api/ai-settings',self.member)['configured'])
+        with patch('server.recognition.fetch') as network:
+            for body in [{'apiKey':'AIzaTestKey_0123456789abcdef','model':'auto'},{'clear':True}]:
+                with self.subTest(body=body):
+                    with self.assertRaises(urllib.error.HTTPError) as e:self.call('/api/ai-settings',self.member,body)
+                    self.assertEqual(e.exception.code,403)
+            network.assert_not_called()
+        self.assertEqual(self.call('/api/ai-settings',self.admin,{'clear':True})['configured'],False)
+    def test_invalid_user_config_is_rejected(self):
+        from server.app import parse_users
+        token='t'*24
+        for users in [{token:{'name':'A','role':'owner'}},{token:{'name':''}},{token:{'name':'A','extra':1}},{'short':'A'},[token]]:
+            with self.subTest(users=users),self.assertRaises(ValueError):parse_users(json.dumps(users))
+
 if __name__=='__main__':unittest.main()
