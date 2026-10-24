@@ -31,7 +31,9 @@ class Provider:
     """One AI service: which models fit label reading, and how to ask one for JSON."""
     id=label=key_env=model_env=''
     def rank(self, name):
-        """Higher is better for label reading; None when the model cannot read a label into JSON."""
+        """Automatic choice takes the highest rank: stable before preview, then the fastest and cheapest
+        tier that reads images (reading a label is OCR), then the newest version. Users who find it
+        inaccurate pick a larger model on the settings screen. None when the model cannot read a label into JSON."""
         match=self.MODEL_NAME.fullmatch(name)
         return self.order(*match.groups()) if match else None
     def choose(self, names):
@@ -55,8 +57,7 @@ class Gemini(Provider):
     def rank(self, name):
         return None if self.SPECIAL.search(name) else super().rank(name)
     def order(self, version, family, channel):
-        # Stable before preview, Flash (fast, cheap, image input) before Pro and Lite, newest version first.
-        return (channel is None,{'flash':3,'pro':2,'flash-lite':1}[family],tuple(int(n) for n in version.split('.')))
+        return (channel is None,{'flash-lite':3,'flash':2,'pro':1}[family],tuple(int(n) for n in version.split('.')))
     def list_models(self, key):
         names,page=[],''
         for _ in range(10):
@@ -81,7 +82,7 @@ class Claude(Provider):
         version=(int(major),int(minor or 0))
         # Structured outputs (guaranteed JSON) start with the 4.5 generation.
         if version<(4,5):return None
-        return (dated is None,{'opus':3,'sonnet':2,'haiku':1}[family],version)
+        return (dated is None,{'haiku':3,'sonnet':2,'opus':1}[family],version)
     def headers(self, key):
         return {'x-api-key':key,'anthropic-version':self.VERSION,'Content-Type':'application/json'}
     def list_models(self, key):
@@ -116,9 +117,9 @@ class OpenAI(Provider):
         return tuple(int(n) for n in self.MODEL_NAME.fullmatch(name).group(1).split('.'))
     def order(self, version, family, dated):
         version=tuple(int(n) for n in version.split('.'))
-        # GPT-4.1 and later read images; mini is fast and cheap enough for a label.
+        # GPT-4.1 and later read images.
         if version<(4,1):return None
-        return (dated is None,{'mini':3,None:2,'nano':1}[family],version)
+        return (dated is None,{'nano':3,'mini':2,None:1}[family],version)
     def list_models(self, key):
         result=fetch(urllib.request.Request(f'{self.API}/models',headers={'Authorization':f'Bearer {key}'}),20)
         return {m['id']:{} for m in result['data']}
@@ -180,7 +181,7 @@ class LabelRecognizer:
             model=p.choose(found)
             if not model:raise RecognitionError(f'このAPIキーで使える{p.label}の画像対応モデルが見つかりません')
         elif model not in found:raise RecognitionError('このAPIキーでは選択したモデルを使えません')
-        for name,value in (('api_key',key),('model',model),('model_choice',choice),('model_options',json.dumps(found[model])),('models',json.dumps(sorted(n for n in found if p.rank(n))))):
+        for name,value in (('api_key',key),('model',model),('model_choice',choice),('model_options',json.dumps(found[model])),('models',json.dumps(sorted((n for n in found if p.rank(n)),key=p.rank,reverse=True)))):
             self.settings.set_setting(f'{p.id}_{name}',value)
         self.settings.set_setting('ai_provider',p.id)
         return self.status()

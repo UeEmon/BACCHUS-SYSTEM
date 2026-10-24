@@ -43,9 +43,10 @@ def listing(*names,**extra):
     return io.BytesIO(json.dumps(dict(models=[dict(name='models/'+n,supportedGenerationMethods=['generateContent']) for n in names],**extra)).encode())
 
 class ModelChoiceTests(unittest.TestCase):
-    def test_prefers_newest_stable_flash(self):
+    def test_prefers_newest_stable_fastest_tier(self):
         names=['gemini-2.5-flash','gemini-3.5-flash','gemini-3.5-pro','gemini-3.6-flash-lite','gemini-3.7-flash-preview-09-2026','gemini-3.6-flash-preview-tts','gemini-3.6-flash-image','gemini-flash-latest','gemma-3-27b-it']
-        self.assertEqual(choose_model(names),'gemini-3.5-flash')
+        self.assertEqual(choose_model(names),'gemini-3.6-flash-lite')
+        self.assertEqual(choose_model(['gemini-3.5-flash','gemini-3.5-pro']),'gemini-3.5-flash')
         self.assertEqual(choose_model(['gemini-3.7-flash-preview','gemini-3.6-pro-preview']),'gemini-3.7-flash-preview')
         self.assertEqual(choose_model(['gemini-10.0-flash','gemini-9.5-flash']),'gemini-10.0-flash')
         self.assertIsNone(choose_model(['gemma-3','gemini-2.5-flash-preview-tts']))
@@ -106,19 +107,25 @@ class ProviderTests(unittest.TestCase):
         self.photo='data:image/jpeg;base64,'+base64.b64encode(b'\xff\xd8test').decode()
     def tearDown(self):self.env.stop();self.tmp.cleanup()
     def test_model_choice_per_provider(self):
-        self.assertEqual(choose_model(['claude-sonnet-5-5','claude-opus-4-8','claude-opus-5-5','claude-haiku-5-5','claude-opus-4-1-20250805','claude-3-5-sonnet-20241022','claude-fable-5-1'],'claude'),'claude-opus-5-5')
-        self.assertEqual(choose_model(['claude-opus-5-5-20260901','claude-opus-5'],'claude'),'claude-opus-5')
+        self.assertEqual(choose_model(['claude-sonnet-5-5','claude-opus-4-8','claude-opus-5-5','claude-haiku-5-5','claude-opus-4-1-20250805','claude-3-5-sonnet-20241022','claude-fable-5-1'],'claude'),'claude-haiku-5-5')
+        self.assertEqual(choose_model(['claude-sonnet-5-5','claude-opus-5-5'],'claude'),'claude-sonnet-5-5')
+        self.assertEqual(choose_model(['claude-haiku-5-5-20260901','claude-haiku-4-5'],'claude'),'claude-haiku-4-5')
         self.assertIsNone(choose_model(['claude-opus-4-1','claude-sonnet-4-20250514'],'claude'))
-        self.assertEqual(choose_model(['gpt-5.5','gpt-5.5-mini','gpt-5-mini','gpt-5.5-nano','gpt-5.5-mini-2026-08-01','gpt-4o','gpt-5.5-pro','gpt-realtime','o3'],'openai'),'gpt-5.5-mini')
+        self.assertEqual(choose_model(['gpt-5.5','gpt-5.5-mini','gpt-5-mini','gpt-5.5-nano','gpt-5.5-mini-2026-08-01','gpt-4o','gpt-5.5-pro','gpt-realtime','o3'],'openai'),'gpt-5.5-nano')
+        self.assertEqual(choose_model(['gpt-5.5','gpt-5.5-mini'],'openai'),'gpt-5.5-mini')
         self.assertIsNone(choose_model(['gpt-4o-mini','gpt-4-turbo','gpt-3.5-turbo'],'openai'))
     def test_claude_configure_and_recognize(self):
         key='sk-ant-api03-Test_key-0123456789abcd'
-        listing_body=claude_listing('claude-opus-5-5','claude-haiku-4-5','claude-sonnet-5-5',has_more=False)
+        listing_body=claude_listing('claude-opus-5-5','claude-haiku-4-5','claude-sonnet-5-5','claude-haiku-5-5',has_more=False)
         with patch('urllib.request.urlopen',return_value=listing_body) as network:
             status=self.ai.configure(key,'auto','claude')
         req=network.call_args.args[0]
         self.assertEqual(req.get_header('X-api-key'),key);self.assertNotIn(key,req.full_url);self.assertTrue(req.get_header('Anthropic-version'))
-        self.assertEqual((status['provider'],status['model'],status['keyHint']),('claude','claude-opus-5-5','…abcd'))
+        self.assertEqual((status['provider'],status['model'],status['keyHint']),('claude','claude-haiku-5-5','…abcd'))
+        self.assertEqual(status['models'],['claude-haiku-5-5','claude-haiku-4-5','claude-sonnet-5-5','claude-opus-5-5'])
+        # Users unhappy with the automatic model switch to a larger one.
+        with patch('urllib.request.urlopen',return_value=claude_listing('claude-opus-5-5','claude-haiku-5-5')):status=self.ai.configure(None,'claude-opus-5-5','claude')
+        self.assertEqual((status['model'],status['auto']),('claude-opus-5-5',False))
         self.assertNotIn(key,json.dumps(status));self.assertNotIn(key,json.dumps(self.repo.read()))
         answer={'stop_reason':'end_turn','content':[{'type':'thinking','thinking':''},{'type':'text','text':json.dumps({'name':'試験酒','volume':720})}]}
         with patch('urllib.request.urlopen',return_value=io.BytesIO(json.dumps(answer).encode())) as network:
@@ -141,10 +148,10 @@ class ProviderTests(unittest.TestCase):
                     with self.assertRaises(RecognitionError):self.ai.recognize(self.photo)
     def test_openai_configure_and_recognize(self):
         key='sk-proj-Test_key-0123456789wxyz'
-        with patch('urllib.request.urlopen',return_value=io.BytesIO(json.dumps({'data':[{'id':'gpt-5.5'},{'id':'gpt-5.5-mini'},{'id':'gpt-4o'}]}).encode())) as network:
+        with patch('urllib.request.urlopen',return_value=io.BytesIO(json.dumps({'data':[{'id':'gpt-5.5'},{'id':'gpt-5.5-mini'},{'id':'gpt-5.5-nano'},{'id':'gpt-4o'}]}).encode())) as network:
             status=self.ai.configure(key,'auto','openai')
         self.assertEqual(network.call_args.args[0].get_header('Authorization'),'Bearer '+key)
-        self.assertEqual((status['provider'],status['model'],status['models']),('openai','gpt-5.5-mini',['gpt-5.5','gpt-5.5-mini']))
+        self.assertEqual((status['provider'],status['model'],status['models']),('openai','gpt-5.5-nano',['gpt-5.5-nano','gpt-5.5-mini','gpt-5.5']))
         answer={'choices':[{'message':{'content':json.dumps({'name':'試験酒','brewery':'試験酒造'}),'refusal':None}}]}
         with patch('urllib.request.urlopen',return_value=io.BytesIO(json.dumps(answer).encode())) as network:
             result=self.ai.recognize(self.photo)
