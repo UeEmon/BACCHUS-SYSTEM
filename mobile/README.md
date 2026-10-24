@@ -44,7 +44,7 @@ Flutter 3.47以降（Dart 3.13以降）。開発用サーバーへは`http://10.
 
 ## ビルドと配布
 
-この開発環境ではAndroid SDKを取得できなかったため、ビルドは未確認です。以下を手元のPCまたはCIで実行してください。
+環境の作り方（Windows・Mac、署名、ストア提出、GitHub Actions、トラブル対処）は **[docs/BUILD_SETUP.md](docs/BUILD_SETUP.md)** にまとめています。`dart run tool/check_env.dart` で手元の環境を確認できます。AndroidのリリースAPKのビルドと署名は確認済みです。iOSはMacまたはGitHub Actions（`.github/workflows/mobile.yml`）でビルドします。
 
 ### Android
 
@@ -54,7 +54,7 @@ flutter build appbundle --release  # Google Play用
 ```
 
 - 最小バージョンはAndroid 9（API 28）です。
-- リリース署名の鍵（keystore）を作成し、`android/key.properties`と`android/app/build.gradle.kts`の`signingConfigs`を設定します（現在はデバッグ署名）。手順：https://docs.flutter.dev/deployment/android
+- リリース署名：鍵を作成して`android/key.properties`を置くと、その鍵で署名されます（ない場合はデバッグ署名）。手順はdocs/BUILD_SETUP.mdの「2-3」。
 - アプリIDは`jp.bacchus.bacchus_mobile`です。公開前に組織のドメインに合わせて変更してください。
 
 ### iOS（macOSとXcodeが必要）

@@ -62,7 +62,7 @@ LAN上の別PCから開発確認する場合は`HOST=0.0.0.0 python3 -m server.a
 
 - 生体認証ログインの仕組み：登録時にサーバーが端末トークンを発行し、アプリはOSの保護領域（iOSは現在の生体情報に結び付けたKeychain、AndroidはクラスStrongの生体認証を必須にしたKeystore鍵）に保存します。トークンは生体認証に成功したときだけOSが取り出し、サーバーで1回使うたびに新しいトークンへ交換されます。古いトークンが再び使われた場合は盗用の疑いとして端末の登録を解除します。
 - SSOはOSのブラウザ画面（iOS：ASWebAuthenticationSession、Android：Custom Tabs）で行い、サーバーは`bacchus://sso`（`BACCHUS_APP_SCHEME`で変更可）へ1回限りのコードを返します。
-- ビルド・配布・署名の手順は[mobile/README.md](mobile/README.md)を参照してください。iOSのビルドにはmacOSとXcode、ストア配布には各社の開発者アカウントが必要です。
+- ビルド環境の構築・署名・ストア提出の手順は[mobile/docs/BUILD_SETUP.md](mobile/docs/BUILD_SETUP.md)を参照してください。iOSのビルドにはmacOSとXcode（またはGitHub ActionsのmacOS環境）、ストア配布には各社の開発者アカウントが必要です。
 
 ## 共用保存（テナント）の始め方
 
