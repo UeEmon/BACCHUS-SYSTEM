@@ -65,7 +65,7 @@ class HttpTests(unittest.TestCase):
         s=send();self.assertEqual(s['events'][0]['actor'],'Alice');self.assertEqual(send(),s)
     def test_ai_settings_endpoint(self):
         def call(path,body=None,token=None):
-            request=urllib.request.Request(self.url+path,data=json.dumps(body).encode() if body is not None else None,headers={'Authorization':'Bearer '+(token or self.system),'Content-Type':'application/json'})
+            request=urllib.request.Request(self.url+path,data=json.dumps(body).encode() if body is not None else None,headers={'Authorization':'Bearer '+(token or self.token),'Content-Type':'application/json'})
             with urllib.request.urlopen(request) as response:return json.load(response)
         with self.assertRaises(urllib.error.HTTPError) as e:call('/api/ai-settings',{'apiKey':'x'*30},token='wrong-token-longer-than-24-chars')
         self.assertEqual(e.exception.code,401)

@@ -2,4 +2,18 @@
 .userList{list-style:none;padding:0;margin:.75rem 0}
 .userList li{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:.5rem;padding:.5rem 0;border-bottom:1px solid currentColor;border-bottom-color:color-mix(in srgb,currentColor 15%,transparent)}
 .adminForm{margin-top:.75rem}
-#issuedToken{font-family:ui-monospace,monospace;width:100%}
+dialog.wide{width:min(94vw,760px)}
+.adminTabs{margin:12px 0 18px;overflow-x:auto}
+.adminTabs button{white-space:nowrap;padding:10px 6px}
+.actions.wrap{flex-wrap:wrap;justify-content:flex-start}
+.userList li>div:first-child{flex:1 1 220px;min-width:0;overflow-wrap:anywhere}
+.userList .actions{flex-wrap:wrap;justify-content:flex-end}
+.tableWrap{overflow-x:auto;margin:10px 0}
+.tableWrap table{border-collapse:collapse;width:100%;min-width:560px;font-size:13px}
+.tableWrap th,.tableWrap td{text-align:left;padding:7px 6px;border-bottom:1px solid #e0e4d9;vertical-align:top}
+.tableWrap td small{overflow-wrap:anywhere}
+label.check{display:flex;align-items:center;gap:8px}
+label.check input{width:auto}
+.stat strong{font-size:28px}
+code{overflow-wrap:anywhere;font-size:12px}
+#issuedSecret{font-family:ui-monospace,monospace;width:100%}

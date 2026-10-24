@@ -16,12 +16,18 @@ SCHEMA={'type':'object','additionalProperties':False,'required':[*FIELDS,'volume
         'properties':{**{k:{'type':['string','null']} for k in FIELDS},'volume':{'type':['integer','null']}}}
 
 class RecognitionError(ValueError):
-    pass
+    def __init__(self, message, attempt=None):
+        super().__init__(message)
+        # (provider label, model) when the request reached the AI service and may be billed.
+        self.attempt=attempt
 
 def supported(capabilities, *path):
     for name in path:
         capabilities=capabilities.get(name) if isinstance(capabilities,dict) else None
     return isinstance(capabilities,dict) and capabilities.get('supported') is True
+
+def tokens(input_tokens, output_tokens):
+    return {'inputTokens':input_tokens if type(input_tokens) is int else 0,'outputTokens':output_tokens if type(output_tokens) is int else 0}
 
 def fetch(req,timeout):
     with urllib.request.urlopen(req,timeout=timeout) as response:
@@ -69,7 +75,8 @@ class Gemini(Provider):
     def generate(self, key, model, data, options):
         body={'contents':[{'parts':[{'text':PROMPT},{'inline_data':{'mime_type':'image/jpeg','data':data}}]}], 'generationConfig':{'responseMimeType':'application/json','temperature':0}}
         result=fetch(urllib.request.Request(f'{self.API}/models/{model}:generateContent',data=json.dumps(body).encode(),headers={'Content-Type':'application/json','x-goog-api-key':key}),45)
-        return ''.join(p.get('text','') for p in result['candidates'][0]['content']['parts'])
+        meta=result.get('usageMetadata') or {}
+        return ''.join(p.get('text','') for p in result['candidates'][0]['content']['parts']),tokens(meta.get('promptTokenCount'),meta.get('candidatesTokenCount'))
 
 class Claude(Provider):
     id,label,key_env,model_env='claude','Claude','ANTHROPIC_API_KEY','ANTHROPIC_MODEL'
@@ -107,7 +114,8 @@ class Claude(Provider):
         result=fetch(urllib.request.Request(f'{self.API}/messages',data=json.dumps(body).encode(),headers=headers),60)
         if result.get('stop_reason')=='refusal':raise RecognitionError('Claudeがこの画像の読み取りを断りました。手入力で登録してください。')
         if result.get('stop_reason')=='max_tokens':raise ValueError()
-        return ''.join(b['text'] for b in result['content'] if b.get('type')=='text')
+        meta=result.get('usage') or {}
+        return ''.join(b['text'] for b in result['content'] if b.get('type')=='text'),tokens(meta.get('input_tokens'),meta.get('output_tokens'))
 
 class OpenAI(Provider):
     id,label,key_env,model_env='openai','OpenAI','OPENAI_API_KEY','OPENAI_MODEL'
@@ -130,7 +138,8 @@ class OpenAI(Provider):
         result=fetch(urllib.request.Request(f'{self.API}/chat/completions',data=json.dumps(body).encode(),headers={'Authorization':f'Bearer {key}','Content-Type':'application/json'}),60)
         message=result['choices'][0]['message']
         if message.get('refusal'):raise RecognitionError('OpenAIがこの画像の読み取りを断りました。手入力で登録してください。')
-        return message['content']
+        meta=result.get('usage') or {}
+        return message['content'],tokens(meta.get('prompt_tokens'),meta.get('completion_tokens'))
 
 PROVIDERS={p.id:p for p in (Gemini(),Claude(),OpenAI())}
 
@@ -140,12 +149,13 @@ def choose_model(names, provider='gemini'):
 class LabelRecognizer:
     """Settings saved on the web screen win over environment variables, per provider.
     The active provider is the one last saved on the screen, else AI_PROVIDER, else Gemini."""
-    def __init__(self, settings=None):
+    def __init__(self, settings=None, allow_env=True):
         self.settings=settings
+        self.allow_env=allow_env
     def stored(self, key):
         return self.settings.get_setting(key) if self.settings else None
     def active(self):
-        chosen=self.stored('ai_provider') or os.environ.get('AI_PROVIDER','gemini')
+        chosen=self.stored('ai_provider') or (os.environ.get('AI_PROVIDER') if self.allow_env else None) or 'gemini'
         return chosen if chosen in PROVIDERS else 'gemini'
     def provider(self, name):
         if name not in PROVIDERS:raise RecognitionError('AIサービスの指定が不正です')
@@ -154,6 +164,7 @@ class LabelRecognizer:
         p=PROVIDERS[name or self.active()]
         key=self.stored(f'{p.id}_api_key')
         if key:return key,self.stored(f'{p.id}_model') or '','web'
+        if not self.allow_env:return '','','none'
         key,model=os.environ.get(p.key_env,''),os.environ.get(p.model_env,'')
         return key,model,'env' if key else 'none'
     def provider_status(self, name):
@@ -207,27 +218,31 @@ class LabelRecognizer:
         except ValueError:
             raise RecognitionError('画像データが不正です')
         try:
-            result=self.call(p,key,model,data)
+            result,usage=self.call(p,key,model,data)
         except urllib.error.HTTPError as error:
             # A retired model answers 404; with automatic choice, pick the current best once and retry.
-            if error.code!=404 or source!='web' or not self.provider_status(p.id)['auto']:raise self.failure(p,error) from None
+            if error.code!=404 or source!='web' or not self.provider_status(p.id)['auto']:raise self.failure(p,model,error) from None
             model=self.configure(model='auto',provider=p.id)['model']
-            try:result=self.call(p,key,model,data)
-            except urllib.error.HTTPError as again:raise self.failure(p,again) from None
+            try:result,usage=self.call(p,key,model,data)
+            except urllib.error.HTTPError as again:raise self.failure(p,model,again) from None
         clean={k:result[k][:200] if isinstance(result.get(k),str) else '' for k in FIELDS}
         clean['volume']=result.get('volume') if type(result.get('volume')) is int and 1<=result['volume']<=10000 else None
         clean['provider']=p.label
         clean['model']=model
+        clean['usage']=usage
         return clean
     @staticmethod
-    def failure(provider, error):
-        return RecognitionError(f'{provider.label}でエラーが発生しました（HTTP {error.code}）。手入力または後で再試行してください。')
+    def failure(provider, model, error):
+        return RecognitionError(f'{provider.label}でエラーが発生しました（HTTP {error.code}）。手入力または後で再試行してください。',(provider.label,model))
     def call(self, provider, key, model, data):
         options=json.loads(self.stored(f'{provider.id}_model_options') or '{}') if self.config(provider.id)[2]=='web' else {}
         try:
-            result=json.loads(provider.generate(key,model,data,options))
+            text,usage=provider.generate(key,model,data,options)
+            result=json.loads(text)
             if not isinstance(result,dict):raise ValueError()
-            return result
-        except (urllib.error.HTTPError,RecognitionError):raise
+            return result,usage
+        except urllib.error.HTTPError:raise
+        except RecognitionError as error:
+            error.attempt=(provider.label,model);raise
         except (ValueError,TypeError,AttributeError,KeyError,IndexError,urllib.error.URLError,TimeoutError):
-            raise RecognitionError('AIの応答を読み取れません。再撮影または手入力をお試しください。') from None
+            raise RecognitionError('AIの応答を読み取れません。再撮影または手入力をお試しください。',(provider.label,model)) from None
