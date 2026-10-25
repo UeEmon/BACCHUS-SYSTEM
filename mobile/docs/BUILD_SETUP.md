@@ -55,7 +55,16 @@ flutter test          # 11件が成功すればFlutterの準備は完了
    flutter doctor --android-licenses
    ```
 
-5. `flutter doctor` の Android toolchain が ✓ になれば完了です。ビルドに必要なAndroidプラットフォームとビルドツールは、初回ビルド時にGradleが自動でダウンロードします（数分〜十数分かかります）。
+5. JDKを別に入れる必要はありません（Android Studio付属のJDKを使います）。`flutter doctor -v` の「Java binary at」が表示されない、またはJDKのエラーが出る場合は、Flutterに付属JDKの場所を指定します。
+
+   ```sh
+   # macOS
+   flutter config --jdk-dir "/Applications/Android Studio.app/Contents/jbr/Contents/Home"
+   # Windows
+   flutter config --jdk-dir "C:\Program Files\Android\Android Studio\jbr"
+   ```
+
+6. `flutter doctor` の Android toolchain が ✓ になれば完了です。ビルドに必要なAndroidプラットフォームとビルドツールは、初回ビルド時にGradleが自動でダウンロードします（数分〜十数分かかります）。
 
 ### 2-2. 実機で動かす
 

@@ -41,8 +41,18 @@ class LimitError(PermissionError):
 def token_hash(token):
     return hashlib.sha256(token.encode()).hexdigest()
 
+def env_number(name, default, kind=float):
+    """A positive number from the environment. Blank counts as unset: Docker Compose passes the
+    empty entries of .env.example as empty strings."""
+    raw=os.environ.get(name,'').strip()
+    if not raw:return default
+    try:value=kind(raw)
+    except ValueError:raise ValueError(f'{name} must be a positive number, got {raw!r}') from None
+    if value<=0:raise ValueError(f'{name} must be a positive number, got {raw!r}')
+    return value
+
 def iterations():
-    return int(os.environ.get('BACCHUS_PBKDF2_ITERATIONS','600000'))
+    return env_number('BACCHUS_PBKDF2_ITERATIONS',600000,int)
 
 def hash_password(password):
     salt=secrets.token_bytes(16);rounds=iterations()
@@ -115,7 +125,10 @@ class AccountService:
         self.repository=repository
         self.env_users=env_users or {}
         self.public_url=public_url.rstrip('/')
-        self.app_scheme=app_scheme
+        self.app_scheme=app_scheme or 'bacchus'
+        # Read once at start so a wrong value stops the server with its name, not each sign-in.
+        self.session_hours=env_number('BACCHUS_SESSION_HOURS',12)
+        iterations()
         self.dummy_hash=None
         if any(u['tenantId'] for u in self.env_users.values()) and not repository.tenant(DEFAULT_TENANT):
             repository.create_tenant('既定のテナント',DEFAULT_TENANT)
@@ -138,7 +151,7 @@ class AccountService:
             self.repository.delete_sessions(token_hash=digest);return None
         # Idle sessions end after BACCHUS_SESSION_HOURS (12 by default); activity extends them, up to 30 days.
         if session['lastSeenAt']<later(minutes=-5):
-            self.repository.touch_session(digest,now(),min(later(hours=float(os.environ.get('BACCHUS_SESSION_HOURS','12'))),(datetime.fromisoformat(session['createdAt'])+timedelta(days=30)).isoformat()))
+            self.repository.touch_session(digest,now(),min(later(hours=self.session_hours),(datetime.fromisoformat(session['createdAt'])+timedelta(days=30)).isoformat()))
         # A password sign-in where MFA is required but not yet set up may only set it up. SSO relies on the
         # identity provider's own MFA; device sign-in already combines the device with its biometric check.
         setup=session['method']=='password' and self.mfa_required(user) and not user['mfaEnabled']
@@ -146,7 +159,7 @@ class AccountService:
                     mustChangePassword=user['mustChangePassword'],mfaEnabled=user['mfaEnabled'],mfaSetupRequired=setup)
     def open_session(self, user, ip, user_agent, method):
         token=secrets.token_urlsafe(32)
-        self.repository.create_session(token_hash(token),user['id'],later(hours=float(os.environ.get('BACCHUS_SESSION_HOURS','12'))),ip,user_agent,method)
+        self.repository.create_session(token_hash(token),user['id'],later(hours=self.session_hours),ip,user_agent,method)
         self.repository.update_user(user['id'],lastLoginAt=now(),failedLogins=0,lockedUntil=None)
         return {'session':token,'mustChangePassword':user['mustChangePassword'] and method=='password'}
     def login_settings(self, tenant_id):
