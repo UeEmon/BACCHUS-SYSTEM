@@ -20,12 +20,12 @@ class NotFound(Exception):
 
 class Application:
     def __init__(self):
-        path=os.environ.get('DATABASE_PATH','data/bacchus.sqlite3')
+        path=os.environ.get('DATABASE_PATH') or 'data/bacchus.sqlite3'
         box,self.key_source=load_box(path)
         self.repository=SQLiteRepository(path,box)
         # Values stored before encryption existed, or under a rotated-out key, are re-encrypted now.
         self.repository.rewrap_secrets()
-        self.accounts=AccountService(self.repository,parse_env_users(os.environ.get('BACCHUS_USERS') or '{}'),os.environ.get('BACCHUS_PUBLIC_URL',''),os.environ.get('BACCHUS_APP_SCHEME','bacchus'))
+        self.accounts=AccountService(self.repository,parse_env_users(os.environ.get('BACCHUS_USERS') or '{}'),os.environ.get('BACCHUS_PUBLIC_URL',''),os.environ.get('BACCHUS_APP_SCHEME') or 'bacchus')
 
 class Handler(BaseHTTPRequestHandler):
     server_version='BACCHUS'
@@ -120,7 +120,7 @@ class Handler(BaseHTTPRequestHandler):
 def create_server(host='127.0.0.1',port=8000):
     server=ThreadingHTTPServer((host,port),Handler);server.application=Application();return server
 if __name__=='__main__':
-    server=create_server(os.environ.get('HOST','127.0.0.1'),int(os.environ.get('PORT','8000')))
+    server=create_server(os.environ.get('HOST') or '127.0.0.1',int(os.environ.get('PORT') or '8000'))
     if not server.application.accounts.has_system_admin():
         print('注意: 全体管理者がいません。BACCHUS_USERSに {"トークン":{"name":"運営","role":"system_admin"}} を追加してください（テナントの作成に必要）',flush=True)
     print(f'BACCHUS-SYSTEM: http://{server.server_address[0]}:{server.server_address[1]}',flush=True)

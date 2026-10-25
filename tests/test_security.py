@@ -183,3 +183,25 @@ class UpgradeV2Tests(unittest.TestCase):
                 self.assertEqual(db.execute("SELECT value FROM metadata WHERE key='schema_version'").fetchone()[0],'3')
 
 if __name__=='__main__':unittest.main()
+
+class BlankEnvironmentTests(unittest.TestCase):
+    """Docker Compose passes the empty entries of .env.example as empty strings."""
+    BLANK={k:'' for k in ('BACCHUS_PUBLIC_URL','BACCHUS_TRUST_PROXY','BACCHUS_SESSION_HOURS','BACCHUS_SECRET_KEY','BACCHUS_SECRET_KEY_PREVIOUS',
+                          'BACCHUS_APP_SCHEME','AI_PROVIDER','GEMINI_API_KEY','GEMINI_MODEL','ANTHROPIC_API_KEY','ANTHROPIC_MODEL','OPENAI_API_KEY','OPENAI_MODEL')}
+    def test_sign_in_works_with_blank_optional_settings(self):
+        from server.app import create_server
+        import threading,urllib.request
+        with tempfile.TemporaryDirectory() as tmp,patch.dict(os.environ,{**self.BLANK,'DATABASE_PATH':tmp+'/db','BACCHUS_USERS':json.dumps({'s'*30:{'name':'運営','role':'system_admin'}})}):
+            http=create_server(port=0);threading.Thread(target=http.serve_forever,daemon=True).start()
+            try:
+                def call(path,body,token=None):
+                    req=urllib.request.Request(f'http://127.0.0.1:{http.server_port}{path}',data=json.dumps(body).encode(),headers={'Content-Type':'application/json',**({'Authorization':'Bearer '+token} if token else {})})
+                    with urllib.request.urlopen(req) as r:return json.load(r)
+                created=call('/api/system',{'action':'createTenant','name':'A店','adminName':'花子','adminEmail':'a@example.com'},'s'*30)
+                self.assertIn('session',call('/api/auth/login',{'email':'a@example.com','password':created['temporaryPassword']}))
+                self.assertEqual((http.application.accounts.app_scheme,http.application.accounts.session_hours),('bacchus',12))
+            finally:http.shutdown();http.server_close()
+    def test_invalid_number_stops_start_with_its_name(self):
+        from server.app import Application
+        with tempfile.TemporaryDirectory() as tmp,patch.dict(os.environ,{**self.BLANK,'DATABASE_PATH':tmp+'/db','BACCHUS_USERS':'{}','BACCHUS_SESSION_HOURS':'twelve'}):
+            with self.assertRaisesRegex(ValueError,'BACCHUS_SESSION_HOURS'):Application()
