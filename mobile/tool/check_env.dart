@@ -11,10 +11,10 @@ void fail(String text) {
   stdout.writeln('  [NG]   $text');
 }
 
-Future<String?> run(String command, List<String> args) async {
+Future<String?> run(String command, List<String> args, {bool anyExitCode = false}) async {
   try {
     final result = await Process.run(command, args, runInShell: Platform.isWindows);
-    return result.exitCode == 0 ? '${result.stdout}${result.stderr}'.trim() : null;
+    return result.exitCode == 0 || anyExitCode ? '${result.stdout}${result.stderr}'.trim() : null;
   } on ProcessException {
     return null;
   }
@@ -45,19 +45,35 @@ Future<void> main() async {
   if (!File('pubspec.yaml').existsSync()) fail('mobile/ フォルダで実行してください');
 
   stdout.writeln('\nAndroid');
-  final java = await run('java', ['-version']);
-  // Match the version line itself; JVM banners such as JAVA_TOOL_OPTIONS can hold other numbers.
-  final javaMatch = java == null ? null : RegExp(r'version "(\d+)(?:\.(\d+))?').firstMatch(java);
-  final javaVersion = javaMatch == null ? null : [int.parse(javaMatch.group(1)!), int.parse(javaMatch.group(2) ?? '0'), 0];
-  if (javaVersion == null) {
-    fail('Javaが見つかりません。Android Studio付属のJDK（JDK 21）を使うか、JDK 17〜21を入れてください');
-  } else if (javaVersion[0] < 17) {
-    fail('JDK 17以上が必要です（現在 ${javaVersion[0]}）');
+  // flutter doctor -v reports issues with a non-zero exit code, and its output is still what we need.
+  final doctor = await run('flutter', ['doctor', '-v'], anyExitCode: true) ?? '';
+  // Android builds use the JDK Flutter is configured with (flutter config --jdk-dir, JAVA_HOME or
+  // Android Studio's bundled JDK), so a Mac without a system-wide `java` is fine.
+  final flutterJava = RegExp(r'Java binary at: (.+)').firstMatch(doctor)?.group(1)?.trim();
+  final javaHome = Platform.environment['JAVA_HOME'];
+  final candidates = [
+    if (flutterJava != null) (flutterJava, 'Flutterが使うJDK'),
+    if (javaHome != null && javaHome.isNotEmpty) ('$javaHome/bin/java', 'JAVA_HOME'),
+    ('java', 'PATH上のjava'),
+  ];
+  (List<int>, String, String)? found;
+  for (final (binary, source) in candidates) {
+    final output = await run(binary, ['-version']);
+    // Match the version line itself; JVM banners such as JAVA_TOOL_OPTIONS can hold other numbers.
+    final match = output == null ? null : RegExp(r'version "(\d+)(?:\.(\d+))?').firstMatch(output);
+    if (match != null) {
+      found = ([int.parse(match.group(1)!), int.parse(match.group(2) ?? '0'), 0], source, binary);
+      break;
+    }
+  }
+  if (found == null) {
+    fail('JDKが見つかりません。Android Studioを入れ（JDKが同梱されます）、flutter config --jdk-dir "/Applications/Android Studio.app/Contents/jbr/Contents/Home" を実行してください');
+  } else if (found.$1[0] < 17) {
+    fail('JDK 17以上が必要です（${found.$2}: ${found.$1[0]}）。Android Studio付属のJDKを flutter config --jdk-dir で指定してください');
   } else {
-    ok('JDK ${javaVersion[0]}');
+    ok('JDK ${found.$1[0]}（${found.$2}: ${found.$3}）');
   }
   final sdk = Platform.environment['ANDROID_HOME'] ?? Platform.environment['ANDROID_SDK_ROOT'];
-  final doctor = await run('flutter', ['doctor', '-v']) ?? '';
   if (doctor.contains('Android SDK at') || (sdk != null && Directory(sdk).existsSync())) {
     ok('Android SDK${sdk != null ? '（$sdk）' : ''}');
   } else {
